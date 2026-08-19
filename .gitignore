@@ -1,0 +1,38 @@
+# ---- patient data. NOTHING here may ever be committed -----------------------
+dicoms/
+nifti/
+seg/
+ureteric_whole_stone_data/
+*.dcm
+*.nii
+*.nii.gz
+*.zip
+*.xlsx
+# derived images can still carry a study id, so they stay out too
+overlays/
+3d_kidneys/
+3D_organ/
+folder_analysis/
+*.stl
+
+# ---- run outputs ------------------------------------------------------------
+run_v*/
+stone_analysis/
+csv/
+*.log
+*.pdf
+
+# ---- python -----------------------------------------------------------------
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# ---- local state ------------------------------------------------------------
+.ureteric_chain.lock
+pwd.env
+.env

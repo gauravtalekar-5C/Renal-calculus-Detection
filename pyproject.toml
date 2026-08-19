@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "calculus"
+version = "0.1.0"
+description = "Renal and ureteric calculus detection and measurement on non-contrast CT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26", "scipy>=1.11", "pandas>=2.1", "nibabel>=5.2",
+    "pydicom>=2.4", "SimpleITK>=2.3", "connected-components-3d>=3.12",
+    "scikit-image>=0.22", "matplotlib>=3.8", "requests>=2.31",
+    "openpyxl>=3.1", "reportlab>=4.0", "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+# TotalSegmentator pins torch, which pins CUDA. Kept separate so the analysis
+# code can be installed and tested without a 3 GB GPU stack.
+seg = ["TotalSegmentator>=2.17"]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+calculus-study      = "calculus.pipeline.infer_study:main"
+calculus-kidney     = "calculus.kidney.detect_stones:main"
+calculus-ureter     = "calculus.ureter.detect_ureteric:main"
+calculus-report     = "calculus.report.make_report_full:main"
+calculus-metrics    = "calculus.evaluate.kidney_metrics:main"
+calculus-eval-ureter = "calculus.ureter.eval_ureteric:main"
+calculus-3d         = "calculus.pipeline.dicom_to_3d:main"
+
+[tool.setuptools.packages.find]
+include = ["calculus*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
