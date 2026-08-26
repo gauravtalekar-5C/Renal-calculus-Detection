@@ -7,7 +7,8 @@ is far faster than the full 117-class run:
     kidney_cyst_*                cyst walls calcify and mimic stones
     urinary_bladder              distal end of the tract, UVJ reference
     aorta / IVC / iliac arteries vascular calcification, the main false positive
-    vertebrae_L1 / L5 / sacrum   craniocaudal landmarks for ureteric segments
+    vertebrae_L1..L5 / sacrum    craniocaudal landmarks, and bone rejection
+                                 along the ureteric corridor
     hip_left / hip_right         bone partial volume near the distal ureter
 
 Model weights live in the shared ~/.totalsegmentator cache (already present);
@@ -39,13 +40,35 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 # done) while the new cohort's 181 volumes went untouched -- and the ureteric
 # detector then failed on all 181 with "no corridor (kidney or bladder missing)".
 from calculus.common.paths import NIFTI, SEG                      # noqa: E402
-TS = os.path.join(ROOT, "venv", "bin", "TotalSegmentator")
+# TotalSegmentator, resolved rather than hardcoded: the package can be checked
+# out anywhere, and assuming a venv inside the repo makes it unrunnable from a
+# clone. Order: an explicit CALCULUS_TS, then whatever is on PATH, then a venv
+# beside the project as a last resort.
+import shutil                                   # noqa: E402
+
+
+def _find_ts():
+    env = os.environ.get("CALCULUS_TS", "").strip()
+    if env:
+        return env
+    found = shutil.which("TotalSegmentator")
+    if found:
+        return found
+    return os.path.join(ROOT, "venv", "bin", "TotalSegmentator")
+
+
+TS = _find_ts()
 
 #requested anatomical structures 
 ROIS = ["kidney_left", "kidney_right", "kidney_cyst_left", "kidney_cyst_right",
         "urinary_bladder", "aorta", "inferior_vena_cava",
         "iliac_artery_left", "iliac_artery_right",
-        "vertebrae_L1", "vertebrae_L5", "sacrum", "hip_left", "hip_right"]
+        # L2-L4 as well as L1/L5: the ureteric corridor passes the mid-lumbar
+        # vertebral bodies, and with no mask there the bone rejection cannot
+        # fire -- trabecular bone sits at 130-350 HU, above the corridor's
+        # 300 HU floor, so it enters the candidate list as a "stone".
+        "vertebrae_L1", "vertebrae_L2", "vertebrae_L3", "vertebrae_L4",
+        "vertebrae_L5", "sacrum", "hip_left", "hip_right"]
 
 
 def main():

@@ -82,8 +82,14 @@ PLAIN_RE = re.compile(
 #code searches plain-re before contrast-re because the pre-contrast also contains the word contrast 
 
 #identifying the junk descriptions, it recognises non-diagnostic or rendered series
+# "dose" needs the lookbehind: Philips names its iterative reconstruction
+# "iDose", so a bare `dose` threw away every "PLAIN THIN, iDose (4)" -- the
+# thin non-contrast series we most want -- as if it were a dose-report
+# screenshot. Seven studies across the cohorts lost their ONLY usable series
+# that way and fell through to verdict=skip. "Dose Report" still matches.
 JUNK_RE = re.compile(
-    r"scout|topogram|localiz|localis|dose|report|screen\s?save|summary|"
+    r"scout|topogram|localiz|localis|(?<![a-z])dose(?![a-z])|report|"
+    r"screen\s?save|summary|"
     r"\bvr\b|\bmip\b|bone\s?3d|smart\s?prep|monitor", re.I)
 
 #this function accepts arg as ImageOrientationPatient (iop)
