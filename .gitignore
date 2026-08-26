@@ -36,3 +36,26 @@ dist/
 .ureteric_chain.lock
 pwd.env
 .env
+
+# patient data and audit exports dropped into the working tree
+Missed_cases/
+*.xlsx
+
+# ---- validation and sweep outputs -------------------------------------------
+# Each of these holds NIfTIs, DICOM zips and derived PNGs for real studies --
+# 2.9 GB across them. Derived images carry a study id, so they stay out for the
+# same reason overlays/ does. The CODE that produces them is tracked; the
+# outputs are reproducible from it.
+case_analysis/
+case_analysis_v2/
+final_check_deployment/
+study_wise_analysis/
+Results_missed/
+sweep_seed/
+merge_state/
+
+# The validation case list quotes radiology report text verbatim. Study ids are
+# internal references, but the clinical narrative is not ours to publish, so it
+# stays local until someone decides otherwise.
+validation_cases.csv
+validation_cases.txt
