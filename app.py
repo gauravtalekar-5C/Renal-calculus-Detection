@@ -588,8 +588,21 @@ class Analyser:
         near = self._csv(os.path.join(rep, f"{sid}_near_miss.csv"))
         ksum = self._csv(os.path.join(run, "csv", "per_study",
                                       f"{sid}_summary.csv"))
-        report = self._report_sections(
-            os.path.join(rep, f"{sid}_report.csv")) or {}
+        # DEFENCE IN DEPTH. infer_study now exits nonzero when the report
+        # tables are missing, but this guard is independent of it on purpose:
+        # the failure it catches is a study with real calculi being answered
+        # "Normal", and one check standing between that and a clinician is not
+        # enough. If the report the response is built FROM does not exist,
+        # there is no answer to give.
+        report_csv = os.path.join(rep, f"{sid}_report.csv")
+        if not os.path.exists(report_csv):
+            raise RuntimeError(
+                "the analysis produced no report table, so this study has no "
+                "result. Refusing to return a prediction: an absent report is "
+                "not a negative finding. "
+                f"[expected {report_csv}; see {os.path.join(run, 'pipeline.log')}]")
+
+        report = self._report_sections(report_csv) or {}
         cap_index, coronal_cap = self._captures(run, sid)
 
         assessable, why = True, None

@@ -1809,6 +1809,18 @@ def _analyse_one(sid, kw):
     return analyse(sid, verbose=False, **kw)
 
 
+# The columns downstream code reads off a candidate row. This is the CONTRACT
+# with make_report, render_overlays and the API, not the full schema -- it only
+# has to be a subset of what a real run produces, and test_empty_study_csv
+# asserts exactly that so the two cannot drift apart.
+CAND_COLS = (
+    "study_id", "stone_id", "compartment", "in_collecting_system",
+    "reject_reason", "is_stone", "seed_peak_hu", "side", "location",
+    "volume_mm3", "max_diameter_mm", "dim_tr_mm", "dim_ap_mm", "dim_cc_mm",
+    "n_voxels", "hu_max", "hu_mean", "centroid_vox",
+)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--debug", default=None, help="single study id")
@@ -1952,10 +1964,16 @@ def main():
 
     os.makedirs(CSV, exist_ok=True)   # a fresh CALCULUS_RUN has no csv/ yet
     cand = pd.DataFrame(all_rows)
-    if len(cand):
-        # every stage-1 candidate, measured, with the reason it was filtered.
-        # This is the labelling pool for the Part 2 CNN.
-        cand.to_csv(os.path.join(CSV, "candidates.csv"), index=False)
+    # every stage-1 candidate, measured, with the reason it was filtered.
+    # This is the labelling pool for the Part 2 CNN.
+    #
+    # Written UNCONDITIONALLY. A study with no stage-1 candidate at all is a
+    # normal kidney, which is a real answer -- but skipping the file made it
+    # indistinguishable from a crash, and the downstream steps died on
+    # FileNotFoundError. An empty frame carries no columns, so the header comes
+    # from CAND_COLS below.
+    (cand if len(cand) else pd.DataFrame(columns=list(CAND_COLS))).to_csv(
+        os.path.join(CSV, "candidates.csv"), index=False)
     # baseline_stones.csv is the ACCEPTED subset -- the clinical answer.
     # candidates.csv above is everything, including what we threw out and why.
     # reject_reason is "" in memory, but the per-study CSVs round-trip it back
@@ -1966,8 +1984,10 @@ def main():
     rr = (cand.reject_reason.fillna("").astype(str).str.strip()
           if len(cand) else None)
     st = cand[rr == ""] if len(cand) else cand
-    if len(cand):
-        st.to_csv(args.out, index=False)
+    # Same reasoning, and the comment above already said "write even when empty
+    # so the header alone keeps the downstream scripts alive". It did not.
+    (st if len(st) else pd.DataFrame(columns=list(CAND_COLS))).to_csv(
+        args.out, index=False)
     su = pd.DataFrame(summaries)          # one row per study, errors included
     su.to_csv(os.path.join(CSV, "baseline_summary.csv"), index=False)
     print(f"\n{len(st)} stones kept from {len(cand)} stage-1 candidates "

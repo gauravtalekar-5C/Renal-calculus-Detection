@@ -205,11 +205,24 @@ def main():
     # Secondary captures BEFORE the report tables: the API references these
     # paths, so they must exist by the time a response is shaped.
     run("secondary captures", ["render_secondary.py", "--studies", sid])
-    run("report tables", ["make_report.py", "--study", sid])
-    run("full report", ["make_report_full.py", "--study", sid])
+    ok_r, _ = run("report tables", ["make_report.py", "--study", sid])
+    ok_f, _ = run("full report", ["make_report_full.py", "--study", sid])
 
     summarise(sid)
     print(f"\ntotal {time.time() - t0:.0f}s")
+
+    # The report tables ARE the answer -- the API shapes its response from them
+    # and from nothing else. Until now main() discarded every run() failure and
+    # exited 0, so a crashed report looked like a completed analysis: on 8583083
+    # the report step died, the API found no CSVs, and reported "Normal" for a
+    # study in which the pipeline had just detected seven ureteric calculi.
+    #
+    # A missing answer must be an error, never a negative finding.
+    if not (ok_r and ok_f):
+        print("\nFAILED: the report tables were not produced, so this study "
+              "has NO result. Exiting nonzero so no caller mistakes the "
+              "absence of findings for an absence of disease.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

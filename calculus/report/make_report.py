@@ -174,6 +174,18 @@ def fmt_size(tr, ap, cc):
 # cell for the bladder printed "-" with the comment "0 here would be a claim we
 # have not tested" -- which was right. It is now tested, so the cell can carry a
 # number, and a real vesical calculus can appear in the stone table.
+def _organ_str(v):
+    """Organ label from a compartment value that may be absent or NaN."""
+    if v is None:
+        return "Kidney"
+    try:
+        if pd.isna(v):
+            return "Kidney"
+    except (TypeError, ValueError):
+        pass
+    return "Kidney" if v == "kidney" else str(v).replace("_", " ").title()
+
+
 def _side_str(v):
     """Side as a string, treating NaN and None as unknown.
 
@@ -581,10 +593,15 @@ def calculi_rows(sid, stones):
         rows.append({
             "study_id": sid,
             # compartment can be absent on a row that came from elsewhere;
-            # crashing the whole report over one field is the wrong trade
-            "Organ": ("Kidney" if r.compartment == "kidney" else
-                      str(r.compartment).replace("_", " ").title()
-                      if pd.notna(r.compartment) else "Kidney"),
+            # crashing the whole report over one field is the wrong trade.
+            #
+            # That comment was already here and the code did not honour it:
+            # `r.compartment` on an itertuples row WITHOUT the field raises
+            # AttributeError before pd.notna is ever reached. On 8583083 that
+            # killed the whole report, and because the API shapes its answer
+            # from the report CSVs, a study with seven detected ureteric stones
+            # came back as "Normal". getattr is the whole fix.
+            "Organ": _organ_str(getattr(r, "compartment", None)),
             "Side": _side_str(r.side).title(),
             "Size (in mm)": size,
             "Density (HU)": int(r.hu_max),

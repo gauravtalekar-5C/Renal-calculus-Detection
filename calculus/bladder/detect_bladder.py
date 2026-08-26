@@ -35,13 +35,30 @@ WHAT IS DIFFERENT HERE, AND WHY THE KIDNEY RULES DO NOT TRANSFER
     30-50 mm; this cohort has one at 51 mm. MAX_DIAM_MM = 22 deleting a real
     23 mm ureteric stone this morning is the standing reminder of what a cap
     fitted to a small sample does.
-  * THE WALL MUST BE EXCLUDED. The bladder mask includes the detrusor, and the
-    wall against perivesical fat is a partial-volume edge that thresholds like a
-    thin stone. So the ROI is the mask ERODED by WALL_ERODE_MM.
+  * THE WALL MUST BE EXCLUDED -- BUT NOT BY ERODING THE LUMEN. The bladder mask
+    includes the detrusor, and the wall against perivesical fat is a
+    partial-volume edge that thresholds like a thin stone. The first version of
+    this module answered that by eroding the mask 3 mm and searching only what
+    was left. That is wrong, and 8583083 is the proof: three vesical calculi,
+    the largest 17.37 x 17.0 mm at 1053 HU, and the erosion removed ALL 393
+    voxels above 300 HU. Max HU inside the eroded mask fell from 1078 to 122.
+    We reported the study Normal.
+
+    The reason is anatomy. A bladder stone is DEPENDENT -- it rests on the
+    bladder floor under gravity, in contact with the wall. The 3 mm shell being
+    discarded as "wall" is exactly where the stones are. Eroding to avoid wall
+    calcification deletes the thing being looked for.
+
+    So the ROI is now the FULL mask, and depth from the wall is measured and
+    RECORDED per candidate (depth_mm, at_wall) instead of being used to
+    pre-delete voxels. Wall calcification has to be told apart by shape, which
+    is what the descriptors are for -- a mural plaque is a thin curvilinear
+    shell, a stone is a compact blob, and fill_fraction already separates those.
   * DEPENDENT POSITION IS A CUE, NOT A RULE. Stones sit in the dependent part of
     the lumen, but "dependent" depends on how the patient is lying, and a stone
     in a bladder diverticulum is not dependent at all. Recorded, never used to
-    reject.
+    reject. The erosion above violated this principle geometrically while the
+    principle sat two lines below it.
   * A FOLEY BALLOON IS THE MIMIC. A catheter balloon sits in the lumen and its
     fill can be dense. It is round, thin-walled and hollow, so it is flagged by
     the same lucent-centre reasoning the phlebolith test uses -- flagged, not
@@ -76,7 +93,11 @@ from calculus.kidney import detect_stones as ds
 GROW_HU = ds.GROW_HU
 SEED_HU = ds.SEED_HU
 
-WALL_ERODE_MM = 3.0      # keep the lumen, drop the detrusor and its outer edge
+# Depth from the bladder wall at which a candidate is no longer called "at the
+# wall". This is a FLAG threshold, not a search boundary -- see the module
+# docstring. It was WALL_ERODE_MM = 3.0 and it silently deleted every dependent
+# stone.
+WALL_FLAG_MM = 3.0
 MIN_DIAM_MM = 1.5        # same as the kidney: reports go down to ~1.1 mm
 MIN_VOL_MM3 = 0.5
 # NO MAX. See the module docstring.
@@ -131,15 +152,23 @@ def analyse(study_id, verbose=False, denoise=True):
             "spacing_mm": "x".join(f"{s:.3f}" for s in spacing),
             "bladder_ml": round(float(bladder.sum()) * voxel_mm3 / 1000.0, 1)}
 
-    # ---- the lumen: erode the wall away -------------------------------------
+    # ---- the search region: the WHOLE mask ----------------------------------
     # Cropped, as everywhere else: a full-volume distance transform on a 512^3
     # volume costs tens of seconds to answer a question about one organ.
-    box = ds._pad_box(bladder, WALL_ERODE_MM + 2.0, spacing, vol.shape)
+    #
+    # wall_d is still computed, but it now labels candidates rather than
+    # excluding voxels. See the module docstring for what eroding cost us.
+    box = ds._pad_box(bladder, WALL_FLAG_MM + 2.0, spacing, vol.shape)
     wall_d = ds.dist_mm(~bladder[box], spacing)      # distance inward from wall
-    lumen_sub = wall_d > WALL_ERODE_MM
+    lumen_sub = bladder[box]
     if not lumen_sub.any():
-        return [], {**summ, "error": "bladder too small to erode a lumen"}
+        return [], {**summ, "error": "bladder mask empty in its own bounding box"}
     summ["lumen_ml"] = round(float(lumen_sub.sum()) * voxel_mm3 / 1000.0, 1)
+    # the urine reference must still come from the interior, or the wall and the
+    # perivesical fat drag the median away from the lumen it is meant to describe
+    interior = wall_d > WALL_FLAG_MM
+    if not interior.any():
+        interior = lumen_sub
 
     sub_vol = vol[box]
     det = np.clip(sub_vol, ds.CLIP_LOW, ds.CLIP_HIGH).astype(np.float32)
@@ -155,7 +184,7 @@ def analyse(study_id, verbose=False, denoise=True):
     # urine reference: the lumen's own median. On a plain scan this should be
     # 0-20 HU; well above that means contrast, and a stone cannot be told from
     # opacified urine, so we abstain exactly as the kidney detector does.
-    urine = float(np.median(sub_vol[lumen_sub]))
+    urine = float(np.median(sub_vol[interior]))
     summ["urine_median_hu"] = round(urine, 1)
     if urine > ds.KIDNEY_PLAIN_MAX_HU:
         return [], {**summ, "error": ("opacified urine "
@@ -182,6 +211,30 @@ def analyse(study_id, verbose=False, denoise=True):
     summ["n_candidates_raw"] = int(n)
     if not keep:
         return [], {**summ, "n_candidates": 0, "n_stones": 0}
+
+    # REJOIN FRAGMENTS. Exactly the failure merge_fragments was written for in
+    # the kidney -- "8664459 report: THREE calculi, ours: THIRTEEN". On 8583083
+    # the report describes three vesical calculi and the raw components gave
+    # ELEVEN: the three real stones at 15-17 mm and 1130-1150 HU, plus eight
+    # pieces of 7.6-9.1 mm whose fill_fraction was 0.009-0.016 -- a 7 mm caliper
+    # around almost no volume, which is what a partial-volume neck or a
+    # beam-hardening streak between two dense stones looks like.
+    #
+    # Reused rather than reimplemented, and with the same two conditions: the
+    # pieces must share a connected component of vol >= 80 HU AND lie within
+    # 3 mm of each other. Nothing here needs `forbid` -- there is no
+    # split_touching_stones pass in the bladder for a merge to undo.
+    peak_of = {}
+    for i in keep:
+        bb_i = bboxes[i]
+        peak_of[i] = float(sub_vol[bb_i][lab[bb_i] == i].max())
+    if len(keep) > 1:
+        lab, peak_of, n, n_merge = ds.merge_fragments(
+            lab, n, peak_of, sub_vol, spacing, voxel_mm3)
+        summ["n_merges"] = int(n_merge)
+        keep = sorted(peak_of.keys())
+        stats = cc3d.statistics(lab)
+        counts, bboxes = stats["voxel_counts"], stats["bounding_boxes"]
 
     # dependent direction: within the bladder, "down" is +axis1 (posterior) and
     # -axis2 (caudal) in the RAS volumes we build. Reported as a cue only.
@@ -249,6 +302,16 @@ def analyse(study_id, verbose=False, denoise=True):
         if (dmax >= BALLOON_MIN_DIAM_MM and np.isfinite(luc)
                 and luc < BALLOON_LUCENCY_HU):
             review.append("balloon_like")
+        # AT THE WALL. Now that the search covers the whole mask instead of an
+        # eroded lumen, mural calcification can reach the candidate list. It is
+        # flagged, not rejected: a dependent stone resting on the bladder floor
+        # is ALSO at the wall, and that is where bladder stones normally are, so
+        # position cannot separate the two. Shape can -- a mural plaque is a thin
+        # curvilinear shell and a stone is a compact blob -- so the flag pairs
+        # the position with the fill fraction rather than acting on either.
+        if wd <= WALL_FLAG_MM:
+            review.append("at_wall_thin" if ds.fill_fraction(pv, dmax)
+                          < ds.FILL_SUSPECT else "at_wall")
         mf = ds.measurement_flags(pv, dmax, hu_max)
 
         if not reason:
