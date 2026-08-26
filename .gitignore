@@ -72,3 +72,7 @@ final_whole_Data_analysis/json/
 final_whole_Data_analysis/runs/
 final_whole_Data_analysis/logs/
 final_whole_Data_analysis/progress.log
+final_whole_Data_analysis/cohort_phase2.csv
+final_whole_Data_analysis/cohort_phase2_ledger.csv
+final_whole_Data_analysis/per_study_result.csv
+final_whole_Data_analysis/supervisor.log

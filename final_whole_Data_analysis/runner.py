@@ -50,7 +50,13 @@ TS_BIN = os.environ.get(
 JSON_DIR = os.path.join(HERE, "json")
 RUNS_DIR = os.path.join(HERE, "runs")
 LOG_DIR = os.path.join(HERE, "logs")
-LEDGER = os.path.join(HERE, "ledger.csv")
+# Which cohort, and which ledger. Phase 1 is the balanced 518; phase 2 adds the
+# remaining reported-negative studies to tighten the false-positive interval.
+# Separate ledgers so the two phases can be read apart as well as together.
+COHORT_FILE = os.environ.get("COHORT_FILE", "cohort.csv")
+LEDGER = os.path.join(HERE, os.environ.get(
+    "COHORT_LEDGER", "ledger.csv" if COHORT_FILE == "cohort.csv"
+    else COHORT_FILE.replace(".csv", "_ledger.csv")))
 ZIP_CACHE = os.path.join(ROOT, "dicoms", "zips", "cohort")
 FOREIGN_ZIPS = "/root/Gaurav/kindey_calculus_measurement/dicoms/zips"
 
@@ -231,11 +237,11 @@ def one(rec):
 
 
 def main():
-    with open(os.path.join(HERE, "cohort.csv")) as fh:
+    with open(os.path.join(HERE, COHORT_FILE)) as fh:
         cohort = list(csv.DictReader(fh))
     todo = [r for r in cohort
             if not os.path.exists(os.path.join(JSON_DIR, f"{r['study_id']}.json"))]
-    print(f"{now()} cohort {len(cohort)}, already done "
+    print(f"{now()} cohort {COHORT_FILE}: {len(cohort)}, already done "
           f"{len(cohort) - len(todo)}, to run {len(todo)}, "
           f"{WORKERS} worker(s), env={ENV}", flush=True)
 
