@@ -152,8 +152,14 @@ OURS_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)")
 
 
 def parse_our_size_mm(text):
-    """Largest axis of our own 'A x B x C' size string, in mm."""
-    vals = [float(v) for v in OURS_SIZE_RE.findall(str(text))]
+    """Largest axis of our own 'A x B x C (AP x TR x CC)' size string, in mm.
+
+    The axis label is stripped explicitly. It happens to hold no digits, so
+    findall would survive it today, but relying on that would make any future
+    label containing a number silently corrupt every size comparison.
+    """
+    txt = re.sub(r"\([^)]*\)", " ", str(text))
+    vals = [float(v) for v in OURS_SIZE_RE.findall(txt)]
     return max(vals) if vals else None
 
 

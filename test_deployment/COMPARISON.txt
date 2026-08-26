@@ -1,0 +1,80 @@
+STUDY 8677121   (iuid 1.2.840.113619.2.415.3.2831174145.576.1785130456.178)
+Variant: Plain   Reported: 2026-07-31   Run: 2026-08-26, 659 s, 389 slices
+NOT in validation_cases.csv -- this study was never used for tuning.
+
+REPORT (radiologist)                                  OURS
+-----------------------------------------------------------------------------------
+1  microlith, left lower pole calyx                    Kidney Left, lower third
+   (no size or density given)                          2.4 x 2.4 x 2.4 mm, 220 HU
+                                                       -> MATCH on side + pole
+
+2  9.1 x 15.4 mm, 502 HU, left VUJ,                    Ureter (VUJ) Left
+   obstructive, upstream moderate HUN                  11.7 x 7.6 x 5.1 mm, 577 HU
+                                                       S4, at VUJ, ~6 mm from UVJ
+                                                       -> MATCH  size -3.7 mm
+                                                                 density 1.15x
+
+3a 3.7 x 4.2 mm, 425 HU, left lower ureter,            Ureter (VUJ) Left
+   ~2 cm above the VUJ                                 4.4 x 5.5 x 7.2 mm (AP x TR x CC)
+                                                       428 HU
+                                                       S3, at VUJ, ~10 mm from UVJ
+                                                       -> MATCH  size +1.1 mm
+                                                                 density 1.007x
+
+3b 4.5 x 6.1 mm, 409 HU, left lower ureter             Ureter (VUJ) Left
+   adjacent to the VUJ                                 5.5 x 4.4 x 7.9 mm, 496 HU
+                                                       S3, at VUJ, ~7 mm from UVJ
+                                                       -> scored UNMATCHED, see below
+
+COUNTS   reported 4 calculi (1 renal + 3 ureteric)
+         ours     4 calculi (1 renal + 3 ureteric)
+         nothing missed, nothing invented
+
+SCORING HARNESS: matched 3/3 of the clauses it could parse, 0 missed,
+1 unmatched detection. The harness extracted only 3 clauses because report
+finding 3 describes TWO calculi in a single sentence -- it set plural_clause=True
+on that row, which is the flag saying so. The 4th detection almost certainly
+corresponds to 3b. Read as 4-for-4 with one pairing the parser could not split.
+
+WHERE WE DISAGREE WITH THE RADIOLOGIST -- both worth a validator's eye
+1  SIZE OF THE INDEX STONE. We call the obstructing VUJ calculus 11.7 mm at its
+   longest; the report says 15.4 mm. A 3.7 mm underestimate on the stone that
+   drives management. Both numbers are "large", but they are not the same number.
+
+2  DISTANCE ALONG THE TRACT. We place all three ureteric calculi at the VUJ,
+   6-10 mm from the UVJ. The report places one of them ~2 cm above it. Our
+   distances are compressed -- we are collapsing a 2 cm spread into 4 mm. The
+   count and side are right; the longitudinal spacing is not.
+
+DENSITY was good: 428 vs 425 HU is essentially exact, and 2 of 2 measurable
+pairs landed within 20%.
+
+
+AXIS CONVENTION -- why their two numbers and our three are not comparable
+-------------------------------------------------------------------------
+A radiologist measures with a caliper on ONE axial slice, so the report quotes
+the two IN-PLANE axes. 328 reports in the cohort state the order outright, e.g.
+"6.8 x 5.5 mm (APxTR)". Across the sheet: 2646 report lines quote two
+dimensions, 331 quote three.
+
+We measure the 3D voxel extent, so we always have a third, cranio-caudal axis
+the radiologist never took -- and for a ureteric stone that axis is often the
+LARGEST, because the stone is elongated along a tube running head-to-foot.
+
+Finding 3a, compared axis for axis instead of max to max:
+
+    axis                       report    ours     diff
+    AP  antero-posterior         3.7      4.4     +0.7
+    TR  transverse               4.2      5.5     +1.3
+    CC  cranio-caudal        not taken    7.2       --
+
+So the apparent "+1.1 mm" in the scoring table was comparing their in-plane
+maximum to our through-plane maximum. In-plane we are within about a millimetre.
+
+This does NOT rescue finding 2. There the report says 9.1 x 15.4 mm, and 15.4 mm
+exceeds EVERY axis we measured (TR 11.7, AP 7.6, CC 5.1, true 3D caliper 12.2).
+That is a genuine ~3 mm underestimate on the obstructing stone, not an artefact
+of axis convention.
+
+The JSON now emits sizes in the report's own order and names the axes:
+    "size_mm": "7.6 x 11.7 x 5.1 (AP x TR x CC)"

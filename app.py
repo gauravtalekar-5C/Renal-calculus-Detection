@@ -526,6 +526,18 @@ class Analyser:
         stone and the first capture was the left 746 HU one. An unmatched entry
         gets no key rather than a plausible wrong image.
         """
+        def axes(v):
+            """The size cell reduced to its numbers.
+
+            Comparing rendered strings coupled this matcher to a formatting
+            choice: adding the "(AP x TR x CC)" label to the report cell but not
+            to the index made every kidney capture disappear from the response,
+            silently, because a failed match yields no key. Numbers survive
+            relabelling, reordering of the suffix, and whitespace.
+            """
+            return tuple(sorted(re.findall(r"\d+(?:\.\d+)?",
+                                           re.sub(r"\([^)]*\)", " ", str(v)))))
+
         pool = list(index.get("kidney", []))
         out = {}
         for side in ("right", "left", "bladder"):
@@ -536,7 +548,8 @@ class Analyser:
                     for k, cap in enumerate(pool):
                         if (cap.get("side") == side
                                 and cap.get("density_hu") == c.get("density_hu")
-                                and cap.get("size_mm") == c.get("size_mm")):
+                                and axes(cap.get("size_mm"))
+                                    == axes(c.get("size_mm"))):
                             c["secondary_capture"] = os.path.join(
                                 "overlays", SUBDIR_SECONDARY, str(sid),
                                 cap["file"])

@@ -289,7 +289,8 @@ def _bladder_lines(sid):
             v = getattr(r, name, float("nan"))
             return f"{float(v):.1f}" if pd.notna(v) else "?"
         out.append(["Bladder",
-                    f"{_f('dim_tr_mm')} x {_f('dim_ap_mm')} x {_f('dim_cc_mm')}",
+                    f"{_f('dim_ap_mm')} x {_f('dim_tr_mm')} x "
+                    f"{_f('dim_cc_mm')} (AP x TR x CC)",
                     int(r.hu_max) if pd.notna(r.hu_max) else NA, loc, NA])
     return out
 

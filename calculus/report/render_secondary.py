@@ -43,6 +43,7 @@ import numpy as np                        # noqa: E402
 import pandas as pd                       # noqa: E402
 
 from calculus.common.paths import CSV, NIFTI, SEG, ensure   # noqa: E402
+from calculus.report.make_report import fmt_size            # noqa: E402
 
 # Bone-ish window: a calculus is far easier to judge wide than on soft tissue.
 WIN = (-150.0, 1200.0)
@@ -109,8 +110,13 @@ def kidney_capture(sid, vol, spacing, row, n, out_dir):
                 mec="#ff3b3b", mew=1.6, ms=16 if tag == "zoom" else 10)
         ax.set_title(f"{tag}  (+/-{half:.0f} mm)", fontsize=8)
         ax.set_xticks([]); ax.set_yticks([])
-    size = " x ".join(f"{getattr(row, k, float('nan')):.1f}"
-                      for k in ("dim_tr_mm", "dim_ap_mm", "dim_cc_mm"))
+    # fmt_size, not a local f-string: the index below is matched against the
+    # report's size cell, and two independent formatters drifting apart is
+    # exactly how the kidney captures silently vanished from the response once
+    # the axis label was added to one of them.
+    size = fmt_size(getattr(row, "dim_tr_mm", float("nan")),
+                    getattr(row, "dim_ap_mm", float("nan")),
+                    getattr(row, "dim_cc_mm", float("nan")))
     # The raw column holds internal tokens -- "lower_pole", "interpolar" --
     # which read as code in a caption. Use the report's own wording, and say
     # "calyx" only when the stone is in the collecting system, exactly as

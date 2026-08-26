@@ -145,8 +145,29 @@ def mask_dims_mm(mask, spacing):
     return tuple(float(v) for v in ext)
 
 
-def fmt_size(a, b, c):
-    return f"{a:.1f} x {b:.1f} x {c:.1f}"
+def fmt_size(tr, ap, cc):
+    """Size string in the REPORT's axis order, labelled.
+
+    Radiologists measure with a caliper on one axial slice, so they quote two
+    in-plane axes and 328 reports in the cohort state the order outright:
+    "6.8 x 5.5 mm (APxTR)". We measure the 3D voxel extent, so we always have a
+    third, cranio-caudal axis they never took -- and for a ureteric stone that
+    third axis is frequently the LARGEST, because the stone is elongated along
+    a tube running head-to-foot.
+
+    Two consequences, both of which bit us on 8677121:
+
+      - Emitting TR first while every report writes AP first meant a reader
+        comparing our string to a report was silently comparing different axes.
+      - Comparing our largest axis to their largest made us look like we
+        over-measure, when their largest is in-plane and ours often is not.
+        Ours read "7.2" against their "4.2" for a stone whose in-plane axes
+        were 5.5 x 4.4 against their 4.2 x 3.7.
+
+    So: report order, and say which axis is which. The suffix carries no digits,
+    so anything parsing the numbers out is unaffected.
+    """
+    return f"{ap:.1f} x {tr:.1f} x {cc:.1f} (AP x TR x CC)"
 
 
 # Bladder calculi. Until calculus.bladder.detect_bladder existed, the Calculus

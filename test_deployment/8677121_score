@@ -1,0 +1,5 @@
+study_id,category,outcome,report_clause,report_comp,report_side,report_mm,report_hu,our_organ,our_side,our_mm,our_hu,our_location,mm_err,hu_ratio,plural_clause,cost
+1.2.840.113619.2.415.3.2831174145.576.1785130456.178,mixed_renal_and_ureteric,matched,A microlith is seen in the lower pole calyx of the left kidney.,renal,left,,,Kidney,Left,2.4,220,lower third,,,False,7.0
+1.2.840.113619.2.415.3.2831174145.576.1785130456.178,mixed_renal_and_ureteric,matched,An obstructive calculus measuring 9.1 x 15.4 mm (attenuation 502 HU) is seen at the left vesico-uret,vuj,left,15.4,502.0,Ureter (VUJ),Left,11.7,577,S4 level - At VUJ - ~6 mm from UVJ,-3.7,1.149,False,4.45
+1.2.840.113619.2.415.3.2831174145.576.1785130456.178,mixed_renal_and_ureteric,matched,Two additional obstructive calculi are noted in the left lower ureter adjacent to the VUJ: one measu,vuj,left,6.1,425.0,Ureter (VUJ),Left,7.2,428,S3 level - At VUJ - ~10 mm from UVJ,1.1,1.007,True,2.13
+1.2.840.113619.2.415.3.2831174145.576.1785130456.178,mixed_renal_and_ureteric,UNMATCHED_DETECTION,,,,,,Ureter (VUJ),Left,7.9,496,S3 level - At VUJ - ~7 mm from UVJ,,,,
