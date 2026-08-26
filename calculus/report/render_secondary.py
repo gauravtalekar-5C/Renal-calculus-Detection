@@ -121,11 +121,11 @@ def kidney_capture(sid, vol, spacing, row, n, out_dir):
     in_cs = bool(getattr(row, "in_collecting_system", False))
     loc = (f"{third} pole calyx" if third and in_cs
            else f"{third} third" if third else "")
-    fig.suptitle(f"{sid}   renal calculus {n}   {size} mm   "
+    fig.suptitle(f"renal calculus {n}   {size} mm   "
                  f"{getattr(row, 'hu_max', float('nan')):.0f} HU   "
-                 f"{str(getattr(row, 'side', '') or '').title()} {loc}",
-                 fontsize=9)
-    fig.tight_layout(rect=[0, 0, 1, 0.88])
+                 f"{str(getattr(row, 'side', '') or '').title()} {loc}\n{sid}",
+                 fontsize=9, linespacing=1.6)
+    fig.tight_layout(rect=[0, 0, 1, 0.84])
     dest = os.path.join(out_dir, f"kidney_{n:02d}.png")
     fig.savefig(dest, dpi=110, pil_kwargs={"optimize": True})
     plt.close(fig)
@@ -181,9 +181,8 @@ def coronal_capture(sid, vol, spacing, ureteric, bladder, out_dir):
                     fontsize=10 if label == "B" else 9,
                     ha="center" if label == "B" else "left", va="center",
                     fontweight="bold" if label == "B" else "normal")
-    ax.set_title(f"{sid}   coronal MIP\n"
-                 "blue kidneys, yellow bladder, red ureteric, orange bladder "
-                 "calculi", fontsize=9)
+    ax.set_title("coronal MIP -- blue kidneys, yellow bladder,\n"
+                 f"red ureteric, orange bladder calculi\n{sid}", fontsize=8)
     ax.set_xlabel("patient left  ->", fontsize=8)
     ax.set_ylabel("^ head", fontsize=8)
     ax.set_xticks([]); ax.set_yticks([])
