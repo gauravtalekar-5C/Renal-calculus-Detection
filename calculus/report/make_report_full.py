@@ -83,7 +83,15 @@ def _assessable(sid):
         return True, ""
     if not len(d):
         return True, ""
-    err = str(d.iloc[0].get("error", "") or "").strip()
+    raw = d.iloc[0].get("error", "")
+    # pandas reads an empty CSV cell back as NaN, and str(NaN) is the STRING
+    # "nan" -- truthy and non-empty. This printed "NOT ASSESSED for renal
+    # calculi (nan)" into the impression of a study that had been analysed
+    # perfectly well. Third instance of this same NaN confusion today, after a
+    # crash in make_report and a wrong status in the API.
+    err = "" if pd.isna(raw) else str(raw).strip()
+    if err.lower() == "nan":
+        err = ""
     if not err:
         return True, ""
     low = err.lower()
@@ -152,9 +160,25 @@ def stone_lines(sid, stones, ureter):
             size = (fmt_size(r.dim_tr_mm, r.dim_ap_mm, r.dim_cc_mm) if have3d
                     else f"{r.max_diameter_mm:.1f}")
             zone = str(r.zone or "")
-            loc = UR_ZONE.get(zone, "Ureter")
+            # VERTEBRAL LEVEL FIRST. This was added to make_report (which writes
+            # the calculi table) and NOT here, so the structured report -- and
+            # therefore the API, which reads this file -- still printed only the
+            # UVJ distance. That distance rests on a landmark measured 49 mm out
+            # on one distended bladder; the level is read off the vertebral masks
+            # and matched the radiologists' own wording ("at L5-S1 level") on 2
+            # of the 3 cohort cases that state one. Two report writers, one of
+            # them updated: the localisation improvement was invisible to every
+            # consumer of the structured report.
+            lvl = str(getattr(r, "vertebral_level", "") or "").strip()
+            bits = []
+            if lvl and lvl.lower() != "nan":
+                bits.append(f"{lvl} level")
+            zt = UR_ZONE.get(zone, "Ureter")
+            if zt:
+                bits.append(zt)
             if pd.notna(getattr(r, "dist_to_uvj_along_mm", None)):
-                loc += f" - Distance from UVJ: {r.dist_to_uvj_along_mm:.1f} mm"
+                bits.append(f"~{r.dist_to_uvj_along_mm:.0f} mm from UVJ")
+            loc = " - ".join(bits) if bits else "Ureter"
             out[side].append([f"Ureter ({UR_SHORT.get(zone, zone)})", size,
                               int(r.hu_max), loc, NA])
     return out
@@ -199,6 +223,15 @@ def impressions(sid, stones, ureter):
                  if pd.notna(getattr(r, "dist_to_uvj_along_mm", None)) else "")
             out.append(f"{size} mm calculus ({int(r.hu_max)} HU) is present in "
                        f"the {r.side} ureter {where}{d}.")
+    # BLADDER. impressions() was written when only the kidney and ureter were
+    # searched, so a bladder-only finding produced no sentence at all -- the
+    # report read "No calculus detected in either kidney or ureter" while its own
+    # CALCULUS_BLADDER section listed a stone. A report that contradicts itself
+    # in two adjacent sections is worse than one that is merely incomplete.
+    for b in _bladder_lines(sid):
+        out.append(f"A {b[1]} mm calculus ({b[2]} HU) is present in the "
+                   f"{b[3]}.")
+
     if not out:
         # "No calculus detected" is only honest when we actually looked. On a
         # contrast or excretory-phase scan the detector abstains, and this line
@@ -206,18 +239,58 @@ def impressions(sid, stones, ureter):
         # what happened to 6 of the 10 renal misses in the 54-study audit.
         ok, note = _assessable(sid)
         if ok:
-            out.append("No calculus detected in either kidney or ureter.")
+            out.append("No calculus detected in the kidneys, ureters "
+                       "or bladder.")
         else:
             out.append(f"NOT ASSESSED for renal calculi ({note}). This study "
                        "was not evaluated; absence of a finding here does NOT "
                        "mean absence of a calculus.")
     # the honest footer -- these are absent from the model, not absent in the
     # patient, and a reader of the CSV alone must not infer otherwise
+    # Bladder calculi were on this list until the bladder detector existed.
+    # Leaving them would tell a reader we had not looked, on a study where we
+    # had looked and found one.
     out.append("NOT ASSESSED by this model: hydronephrosis, perinephric fat "
-               "stranding, stent, bladder calculi.")
+               "stranding, ureteric stent.")
     if ureter is not None and len(ureter):
         out.append("Ureteric distances are approximate: the UVJ reference point "
                    "is geometric and not yet validated against a radiologist.")
+    return out
+
+
+def _bladder_lines(sid):
+    """Bladder calculi as report rows.
+
+    Read from the bladder detector's own CSV rather than from `stones`: the
+    kidney table does not contain them, and my first attempt at this section
+    wrote `(k or [])` where k is a DataFrame, which raises
+    "The truth value of a DataFrame is ambiguous". That error was invisible
+    because the caller redirected stderr to /dev/null, so the report simply did
+    not exist and the API returned report: null.
+    """
+    p = os.path.join(CSV, "per_study", f"{sid}_bladder_candidates.csv")
+    if not os.path.exists(p):
+        return []
+    try:
+        d = pd.read_csv(p)
+    except Exception:
+        return []
+    if not len(d) or "is_stone" not in d.columns:
+        return []
+    d = d[d.is_stone.astype(bool)]
+    out = []
+    for r in d.itertuples():
+        dep = getattr(r, "dependent_frac", None)
+        loc = "bladder lumen"
+        if dep is not None and pd.notna(dep):
+            loc += (" (dependent)" if float(dep) >= 0.6
+                    else " (non-dependent)" if float(dep) <= 0.3 else "")
+        def _f(name):
+            v = getattr(r, name, float("nan"))
+            return f"{float(v):.1f}" if pd.notna(v) else "?"
+        out.append(["Bladder",
+                    f"{_f('dim_tr_mm')} x {_f('dim_ap_mm')} x {_f('dim_cc_mm')}",
+                    int(r.hu_max) if pd.notna(r.hu_max) else NA, loc, NA])
     return out
 
 
@@ -244,11 +317,20 @@ def build(sid, stones, ureter):
                      "A/P", ""])
         for r in lines[side]:
             rows.append([tag] + list(r) + [""])
-    rows.append(["CALCULUS_BLADDER", "Bladder: Total Counts", NA,
+    # BLADDER. This printed a row of dashes and a count of "-" because the
+    # bladder was never searched. It is searched now, and a study with a detected
+    # vesical calculus still showed "-" here while the header said
+    # "Total calculi: 1" -- a report contradicting itself.
+    bl = _bladder_lines(sid)
+    rows.append(["CALCULUS_BLADDER", "Bladder: Total Counts", len(bl),
                  "", "", "", ""])
     rows.append(["CALCULUS_BLADDER", "Organ", "Size (in mm)", "Density (HU)",
                  "Location", "A/P", ""])
-    rows.append(["CALCULUS_BLADDER", NA, NA, NA, NA, NA, ""])
+    if bl:
+        for r in bl:
+            rows.append(["CALCULUS_BLADDER"] + list(r) + [""])
+    else:
+        rows.append(["CALCULUS_BLADDER", NA, NA, NA, NA, NA, ""])
     for i, line in enumerate(impressions(sid, k, u), 1):
         rows.append(["IMPRESSION", i, line, "", "", "", ""])
     return rows

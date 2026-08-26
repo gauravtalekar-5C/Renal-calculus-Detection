@@ -72,6 +72,7 @@ STAGE_MODULES = {
     "make_report.py":                "calculus.report.make_report",
     "make_report_full.py":           "calculus.report.make_report_full",
     "render_masks.py":               "calculus.common.render_masks",
+    "render_secondary.py":           "calculus.report.render_secondary",
 }
 
 
@@ -201,6 +202,9 @@ def main():
     if ok_u:
         run("ureteric sheet", ["render_ureteric_overlays.py", "--studies", sid,
                                "--rejected", "3", "--overwrite"])
+    # Secondary captures BEFORE the report tables: the API references these
+    # paths, so they must exist by the time a response is shaped.
+    run("secondary captures", ["render_secondary.py", "--studies", sid])
     run("report tables", ["make_report.py", "--study", sid])
     run("full report", ["make_report_full.py", "--study", sid])
 

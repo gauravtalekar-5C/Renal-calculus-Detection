@@ -60,3 +60,6 @@ merge_state/
 validation_cases.csv
 validation_cases.txt
 experiments/__pycache__/
+
+# API run outputs: DICOMs, NIfTI, overlays, per-study CSVs
+api_runs/

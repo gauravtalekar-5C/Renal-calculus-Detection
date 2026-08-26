@@ -40,9 +40,36 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # package root -> project root: calculus/<sub>/x.py is two levels down
 ROOT = os.path.dirname(os.path.dirname(HERE))
 DICOM_DIR = os.path.join(ROOT, "dicoms")
-ZIP_DIR = os.path.join(DICOM_DIR, "zips")
+# Overridable, because the SAME study id in two environments is two different
+# studies. A flat shared cache would serve qa bytes for a prod request, and the
+# mistake would be invisible -- the zip verifies, the pipeline runs, and the
+# numbers are simply about the wrong data.
+ZIP_DIR = os.environ.get("CALCULUS_ZIPS", os.path.join(DICOM_DIR, "zips"))
 MANIFEST = os.path.join(DICOM_DIR, "manifest.csv")
 
+# ENVIRONMENTS. The same StudyInstanceUID exists in several environments and
+# they hold DIFFERENT data, so the environment is part of the request, not a
+# deployment setting. prod stays the default because that is what every existing
+# script and worklist assumed before this argument existed.
+DICOM_HOSTS = {
+    "prod":     "api.5cnetwork.com",
+    "staging":  "e2e-staging-api.5cnetwork.com",
+    "qa":       "e2e-qa-api.5cnetwork.com",
+    "sandbox":  "e2e-sandbox-api.5cnetwork.com",
+}
+DEFAULT_ENV = os.environ.get("CALCULUS_DICOM_ENV", "prod")
+
+
+def api_url(iuid, env=None):
+    """Download URL for one study in one environment."""
+    env = (env or DEFAULT_ENV).strip().lower()
+    if env not in DICOM_HOSTS:
+        raise SystemExit(f"unknown env {env!r}; expected one of "
+                         + ", ".join(sorted(DICOM_HOSTS)))
+    return f"https://{DICOM_HOSTS[env]}/dicom/download/{iuid}"
+
+
+# kept for callers that still format it themselves; prod, as before
 API = "https://api.5cnetwork.com/dicom/download/{iuid}"
 CHUNK = 1 << 20            # 1 MiB
 CONNECT_TIMEOUT = 30
@@ -53,7 +80,7 @@ READ_TIMEOUT = 330
 RETRIES = 3
 BACKOFF = 30               # seconds, multiplied by attempt number
 
-MANIFEST_COLS = ["study_id", "study_iuid", "tier", "family", "variant",
+MANIFEST_COLS = ["study_id", "study_iuid", "env", "tier", "family", "variant",
                  "calculus_flag", "status", "bytes", "n_files", "seconds",
                  "attempts", "error"]
 
@@ -116,7 +143,9 @@ def download_one(rec, session, args):
     dest = os.path.join(ZIP_DIR, f"{sid}.zip")
     part = dest + ".part"
 
-    row = {"study_id": sid, "study_iuid": iuid, "tier": rec.get("tier", ""),
+    row = {"study_id": sid, "study_iuid": iuid,
+           "env": (getattr(args, "env", None) or DEFAULT_ENV),
+           "tier": rec.get("tier", ""),
            "family": rec.get("family", ""), "variant": rec.get("variant", ""),
            "calculus_flag": rec.get("calculus_flag", ""), "attempts": 0}
 
@@ -137,7 +166,8 @@ def download_one(rec, session, args):
         t0 = time.time()
         got = 0
         try:
-            with session.get(API.format(iuid=iuid), stream=True,
+            with session.get(api_url(iuid, getattr(args, "env", None)),
+                             stream=True,
                              timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)) as r:
                 if r.status_code != 200:
                     last_err = f"HTTP {r.status_code}: {r.text[:200]}"
@@ -217,6 +247,13 @@ def main():
                          "priority: strict tier order.")
     ap.add_argument("--retry-failed", action="store_true",
                     help="re-attempt studies previously marked fail")
+    ap.add_argument("--env", default=DEFAULT_ENV,
+                    choices=sorted(DICOM_HOSTS),
+                    help="which DICOM environment to fetch from. The same study "
+                         "id in two environments is two different studies, so "
+                         "this is part of the request, not a deployment "
+                         "setting. Default prod, which is what every existing "
+                         "worklist assumed.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 

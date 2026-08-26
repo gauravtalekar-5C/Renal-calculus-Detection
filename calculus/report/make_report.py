@@ -419,7 +419,14 @@ def kidney_assessable(sid):
     if not len(d):
         return True, ""
     r = d.iloc[0]
-    err = str(r.get("error", "") or "").strip()
+    raw = r.get("error", "")
+    # str(NaN) is the STRING "nan", which is truthy. This printed
+    # "NOT ASSESSED (nan)" into the Calculus cell of a study that had been
+    # analysed perfectly well. Fourth instance of this same confusion today --
+    # after a crash here, a wrong API status, and a wrong impression line.
+    err = "" if pd.isna(raw) else str(raw).strip()
+    if err.lower() == "nan":
+        err = ""
     if err:
         if "enhanced" in err.lower() or "excretory" in err.lower():
             med = r.get("kidney_median_hu")
