@@ -59,3 +59,4 @@ merge_state/
 # stays local until someone decides otherwise.
 validation_cases.csv
 validation_cases.txt
+experiments/__pycache__/
