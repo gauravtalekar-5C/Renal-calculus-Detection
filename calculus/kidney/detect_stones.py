@@ -45,8 +45,10 @@ import numpy as np
 import pandas as pd
 import SimpleITK as sitk
 from scipy import ndimage
+from scipy.spatial import cKDTree
 from scipy.spatial import ConvexHull, QhullError
 from skimage.measure import marching_cubes
+from skimage.segmentation import watershed
 
 # this file lives in utils/, so the project root is one level up. All data
 # directories hang off ROOT, never off the script's own folder.
@@ -56,7 +58,19 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 from calculus.common.paths import CSV, NIFTI, SEG     # noqa: E402  results dir is per-run
 
 GROW_HU = 130 
-SEED_HU = 200          # every real stone must contain at least one voxel here
+# Overridable from the environment SO IT CAN BE SWEPT. Not a config knob for
+# production -- the default is the validated value and should stay there. The
+# override exists because SEED_HU is the last remaining sensitivity gap and the
+# trade it makes (microliths gained against noise gained) can only be settled by
+# running the cohort at several values and scoring each. Before the scoring
+# harness existed there was no way to settle it, so it stayed at 200 by default
+# rather than by evidence.
+#
+# What it costs, measured: the three findings still missed on the validation
+# cohort are all sub-3 mm microliths, and the only one with a stated density is
+# 170 HU -- below this line, and therefore invisible by construction.
+SEED_HU = float(os.environ.get("CALCULUS_SEED_HU", 200))
+
 
 #130 HU determines how far the object extends and 200 HU determines whether the object is sufficiantly stone-like
 
@@ -174,7 +188,14 @@ def load_masks(study_id):
     # and vascular calcification both look exactly like stone on CT).
     for name in ["kidney_left", "kidney_right", "urinary_bladder", "aorta",
                  "inferior_vena_cava", "iliac_artery_left", "iliac_artery_right",
-                 "vertebrae_L1", "vertebrae_L5", "sacrum", "hip_left",
+                 # L2-L4 matter as much as L1 and L5: the ureteric corridor
+                 # runs right past the mid-lumbar vertebral bodies, and without
+                 # their masks `bone_frac` has nothing to measure against there.
+                 # On 8677121 that gap produced two false positives -- 19.0 mm
+                 # and 7.5 mm "stones" that were vertebral body, 128 and 139 mm
+                 # above the UVJ, one of them ranked and reported.
+                 "vertebrae_L1", "vertebrae_L2", "vertebrae_L3",
+                 "vertebrae_L4", "vertebrae_L5", "sacrum", "hip_left",
                  "hip_right", "kidney_cyst_left", "kidney_cyst_right"]:
         p = os.path.join(d, f"{name}.nii.gz")
         if os.path.exists(p):                # absent = TotalSegmentator found none
@@ -271,6 +292,18 @@ def crop_box(mask, margin_vox, shape):
 # is what keeps cost per candidate flat no matter how large the study is.
 
 
+def _pad_box(mask, mm, spacing, shape):
+    """Bounding box of `mask` grown by `mm` in every direction, clamped to the
+    array. Used to run the ROI distance transforms on the kidney neighbourhood
+    instead of the whole 100M-voxel volume."""
+    idx = np.nonzero(mask)
+    sl = []
+    for a, n, sp in zip(idx, shape, spacing):
+        m = int(np.ceil(mm / float(sp)))
+        sl.append(slice(max(0, int(a.min()) - m), min(n, int(a.max()) + m + 1)))
+    return tuple(sl)
+
+
 def build_roi(masks, shape, spacing, kidney_only=True):
     """Search region for candidates.
 
@@ -303,7 +336,21 @@ def build_roi(masks, shape, spacing, kidney_only=True):
         # leaving the outer surface almost untouched. A small 3 mm cuff is kept
         # so stones abutting the capsule are not clipped.
         # CLOSING = dilate then erode by the SAME radius.
-        dil = kidney_dist <= SINUS_FILL_MM           # step 1: grow 15 mm outward
+        # CROP FIRST. Measured on 8349056: three full-volume distance
+        # transforms cost 87 s of a 94 s study -- 93% of the runtime -- while
+        # the actual stone finding (denoise + threshold + label) took 0.19 s.
+        # The kidneys occupy ~2% of the volume, and NOTHING outside
+        # SINUS_FILL_MM (dilate reach) + SINUS_FILL_MM (erode reach) of a
+        # kidney can survive into the ROI: outside the dilation `dil` is
+        # False, so `~dil` is True there, so the erosion distance is 0, so
+        # `closed` is False. The result inside the box is therefore
+        # bit-identical to computing on the full volume, and outside the box
+        # it is provably empty. The margin adds the cuff and one voxel of
+        # slack so the box edge is never within reach of either operation.
+        box = _pad_box(kidneys, 2 * SINUS_FILL_MM + CAPSULE_CUFF_MM + 1,
+                       spacing, shape)
+        kd_sub = dist_mm(kidneys[box], spacing)
+        dil = kd_sub <= SINUS_FILL_MM                # step 1: grow 15 mm outward
         # step 2: erode 15 mm back. Eroding a mask == dilating its INVERSE and
         # inverting the result, which is what this line does -- reusing dist_mm
         # instead of needing a separate erosion with a 15 mm ball.
@@ -312,7 +359,13 @@ def build_roi(masks, shape, spacing, kidney_only=True):
         # but leaves concavities FILLED -- and the hilum is the concavity we
         # want, because that is where the pelvis and calyces sit. Add a small
         # outward cuff so a stone touching the capsule is not clipped.
-        roi = closed | (kidney_dist <= CAPSULE_CUFF_MM)
+        roi = np.zeros(shape, bool)
+        roi[box] = closed | (kd_sub <= CAPSULE_CUFF_MM)
+        # +inf outside the box is not a fudge: those voxels really are further
+        # from a kidney than the box margin. The only consumer indexes it at a
+        # stone centroid, and every stone lies inside the ROI, inside the box.
+        kidney_dist = np.full(shape, np.inf, np.float32)
+        kidney_dist[box] = kd_sub.astype(np.float32)
         return roi, kidney_dist
 
     # ---- wider whole-tract mode, OFF by default (see the docstring) ---------
@@ -370,6 +423,112 @@ def kidney_frame(mask, spacing):
 # stone's position can be described anatomically (upper/inter/lower pole)
 # instead of by raw voxel coordinates. Doing it per kidney matters because
 # kidneys are tilted, and differently tilted from each other.
+
+
+# --- IS THIS MEASUREMENT PHYSICALLY POSSIBLE? -------------------------------
+# Two facts about calculi that no threshold sweep is needed to establish:
+#
+#   1. A calculus is COMPACT. It grows by accretion in a fluid-filled space, so
+#      it fills its own envelope. It is not a 30 mm strand holding 200 mm3.
+#   2. A calculus is under about 2000 HU. Calcium oxalate monohydrate, the
+#      densest common stone, peaks near 1500-1700 HU; brushite and cystine are
+#      lower. Above ~2000 HU the object is metal, contrast, or a measurement
+#      that has reached into cortical bone.
+#
+# Both were violated in the validation run, and always together:
+#
+#   8664459   30.4 mm caliper holding 217 mm3   (a ~10 mm stone on the images)
+#   8674625   21.8 mm caliper, 3071 HU          (report: 4.3 x 7 mm)
+#   8664550   2965 HU                           (report: 1396 HU)
+#
+# One mechanism explains all three: the FWHM mask reaching along an adjacent
+# bright structure -- a bone edge, a vessel wall -- which lengthens the caliper
+# and raises the peak at the same time while adding almost no volume.
+#
+# These are FLAGS, not rejections, everywhere except the one place a rejection
+# is justified by measurement (see verdict_measured / LARGE_FOR_URETER_MM):
+# a report that says "we measured this and the number is suspect" is useful; a
+# report that silently deletes a stone because its caliper was odd is how
+# MAX_DIAM_MM = 22 came to remove a real 23.2 mm obstructing calculus.
+HU_IMPLAUSIBLE = 2000.0     # above this it is not a calculus
+FILL_SUSPECT = 0.05         # volume / bounding-sphere volume, below this the
+                            # caliper describes a strand, not a stone
+
+
+def fill_fraction(volume_mm3, dmax_mm):
+    """How much of its own bounding sphere the object occupies.
+
+    A compact stone sits at 0.1-0.5 (a perfect sphere inscribed in its own
+    bounding sphere is 1.0, but real stones are irregular and the caliper runs
+    corner to corner). A strand or a tube sits below 0.03.
+
+    Measured on the validation cohort, accepted ureteric objects over 20 mm:
+        six false positives   0.004 - 0.023
+        one real 21 mm stone  0.145
+    A 6x gap, which is why this separates them and elongation alone did not.
+    """
+    if not (np.isfinite(volume_mm3) and np.isfinite(dmax_mm)) or dmax_mm <= 0:
+        return float("nan")
+    sphere = (4.0 / 3.0) * np.pi * (dmax_mm / 2.0) ** 3
+    return float(volume_mm3 / sphere) if sphere > 0 else float("nan")
+
+
+def measurement_flags(volume_mm3, dmax_mm, hu_max):
+    """Semicolon-joined flags for a measurement that cannot be what it claims."""
+    out = []
+    f = fill_fraction(volume_mm3, dmax_mm)
+    if np.isfinite(f) and f < FILL_SUSPECT:
+        out.append("caliper_suspect")
+    if np.isfinite(hu_max) and hu_max > HU_IMPLAUSIBLE:
+        out.append("hu_implausible")
+    return ";".join(out)
+# WHAT THESE FUNCTIONS DO: check a finished measurement against two physical
+# facts about stones, so a number that cannot be right is labelled rather than
+# published as if it were.
+
+
+def sinus_closed(mask, spacing, shape):
+    """One kidney's outline with the renal SINUS filled in.
+
+    WHY THIS EXISTS -- the calyx-naming bug.
+
+    TotalSegmentator's kidney mask is PARENCHYMA. The renal sinus, the fatty
+    hollow at the hilum that holds the calyces and the renal pelvis, is a hole
+    in it. Stones live in the collecting system, so a calyceal stone sits in
+    that hole -- OUTSIDE the mask.
+
+    The consequence, seen on validation case 8676857: the report describes a
+    calculus in the left MID-POLE CALYX; we detected it (2.7 mm, 243 HU against
+    the report's 236 HU -- a 3% density error) and then labelled it
+    "renal pelvis / perirenal" with NO pole, because the compartment test asked
+    `masks[k][centroid]` and the answer was False. And because the upper/mid/
+    lower calculation only runs inside that branch, the stone never received a
+    zone at all. That is why no report this project has ever produced has said
+    "upper calyx", "mid calyx" or "lower calyx".
+
+    build_roi already solves exactly this problem for the SEARCH region -- it
+    applies the same closing so calyceal stones get found in the first place.
+    Only the CLASSIFICATION was left reading the unclosed mask. This function
+    exists so both use the same geometry.
+
+    Closing, cropped, identical in form to build_roi's: dilate SINUS_FILL_MM,
+    erode the same, which fills concavities while leaving the outer surface
+    where it was. No capsule cuff here -- the cuff is right for deciding what to
+    SEARCH, but it would let a stone a few mm outside the capsule be called
+    intrarenal, which is a different claim.
+    """
+    if not mask.any():
+        return None
+    box = _pad_box(mask, 2 * SINUS_FILL_MM + 1, spacing, shape)
+    kd = dist_mm(mask[box], spacing)
+    dil = kd <= SINUS_FILL_MM
+    closed = ~(dist_mm(~dil, spacing) <= SINUS_FILL_MM)
+    out = np.zeros(shape, bool)
+    out[box] = closed
+    return out
+# WHAT THIS FUNCTION DOES: returns the kidney's silhouette with the hilar notch
+# filled, so "is this stone in the kidney" includes the collecting system that
+# the segmentation model leaves out.
 
 
 def polar_zone(point_world, c, axis, world):
@@ -495,6 +654,382 @@ def split_bone_bridges(labels, n, peak_of, bone_dist, vol, voxel_mm3):
 # its bone part and its non-bone part and lets each be judged separately. No
 # voxel is discarded, so a component that really was all bone behaves exactly as
 # before; only genuinely mixed ones change outcome.
+
+
+# --- splitting stones fused to EACH OTHER -------------------------------
+# Constants for split_touching_stones. Deliberately conservative: the failure
+# mode of splitting is the mirror image of the failure mode of merging, and a
+# branched staghorn wrongly cut into three is as wrong as three stones reported
+# as one.
+TOUCH_MIN_SEP_MM = 2.5      # two peaks closer than this are one stone's texture
+# A second peak must clear the saddle between it and its neighbour by this much
+# before the blob is cut. CALIBRATED on 8677121, where the report names three
+# left ureteric calculi (502, 425, 409 HU) that our 130 HU extent threshold had
+# fused into one 449 mm3 blob. Sweeping the threshold against that known answer:
+#
+#     100-150 HU  ->  4 pieces   over-split (one 15 mm stone cut in half)
+#     200-250 HU  ->  3 pieces   MATCHES the report
+#     300-350 HU  ->  2 pieces   under-split
+#     400 HU      ->  1 piece    no split at all
+#
+# 225 sits mid-plateau, so the answer is not balanced on a knife edge. A single
+# correct value with wrong answers either side would mean fitting to noise; a
+# 50 HU-wide plateau means the saddle is a real feature of the data.
+#
+# CAVEAT: calibrated on ONE study. Needs checking against the 22% of accepted
+# ureteric detections across the other cohorts that contain multiple peaks
+# before it is trusted generally.
+TOUCH_PROMINENCE_HU = 225.0
+TOUCH_MIN_PIECE_MM3 = 2.0    # a fragment smaller than this is not reported alone
+TOUCH_MIN_PARENT_MM = 6.0    # only consider splitting blobs at least this big
+
+# A BRANCHED CALCULUS IS NOT "TWO TOUCHING STONES".
+#
+# The saddle test cannot tell them apart, and measurement shows why. On 8662768
+# the lobes read ~1174 HU and the neck between them 240 HU -- a 900 HU saddle,
+# four times TOUCH_PROMINENCE_HU -- so the splitter fires with great confidence
+# and shreds a single staghorn. Measured pieces per parent component across the
+# validation cohort:
+#
+#     8662768   one parent -> 12 pieces    report: ONE partial staghorn 22x31x29 mm
+#     8675742   one parent -> 15 pieces
+#     8664459   one parent ->  9 pieces    report: ONE partial staghorn 33x19x24 mm
+#     8674625   one parent ->  7 pieces    report: ONE calculus 4.3 x 7 mm
+#     8677813   one parent ->  2 pieces
+#     8677561   no split at all            report: 3 SEPARATE stones -- correct
+#
+# The discriminator is the COUNT, and it needs no fitted threshold. Two stones
+# that partial volume fused are two; reports say "a few calculi in the lower
+# pole calyx", so three in one calyx is ordinary. Twelve pieces out of one
+# object is a branched calculus filling a collecting system, and cutting it up
+# corrupts the count, the size and the impression together.
+#
+# This is deliberately NOT another density or distance constant swept against a
+# small sample -- that is how MAX_DIAM_MM = 22 came to delete a real 23.2 mm
+# stone. It is a statement about what the word "touching" can mean.
+#
+# CHECKED AGAINST THE CASE THE SPLITTER WAS BUILT FOR: on 8677121 the split
+# produces 2 pieces from one parent, under the limit, so the three ureteric
+# calculi that fix still recovers are untouched.
+TOUCH_MAX_PIECES = 3
+
+
+# --- FRAGMENT MERGING -------------------------------------------------------
+# Defaults are set by experiments/merge_sweep.py, not by judgement. Both are
+# passed as arguments so the sweep can drive the same code the detector runs.
+MERGE_MAX_GAP_MM = 3.0     # widest neck a partial volume can hide
+MERGE_BRIDGE_HU = 80.0     # material must be at least this dense all the way
+MERGE_MIN_PIECE_MM3 = 0.0  # merge regardless of piece size by default
+
+
+def merge_fragments(labels, n, peak_of, vol, spacing, voxel_mm3,
+                    gap_mm=None, bridge_hu=None, forbid=None):
+    """Rejoin ONE calculus that partial volume has broken into several pieces.
+
+    THE PROBLEM, and it is the exact mirror image of split_touching_stones.
+
+    Extent comes from GROW_HU (130). A branched staghorn is a single calculus
+    filling the collecting system, but its arms join through NECKS thinner than
+    a voxel. A neck's true density is averaged with the urine around it, so a
+    solid 800 HU bridge occupying an eighth of a voxel reads
+    (800/8) + (30*7/8) = 126 HU -- below 130. The connection is invisible and
+    connected-component labelling returns a handful of separate islands.
+
+    Measured on the validation cohort:
+
+        8662768   report: ONE partial staghorn, 22 x 31 x 29 mm, 1174 HU
+                  ours:   SIXTEEN stones, 7.5-18.9 mm, 500-1301 HU
+        8664459   report: THREE calculi        ours: THIRTEEN
+        8674625   report: one 4.3 x 7 mm       ours: FOUR, up to 14.1 mm
+        8677813   report: one 18 mm            ours: TWO
+
+    It corrupts three numbers at once. The COUNT (16 against 1 is a different
+    disease with a different operation). The SIZE, because we report the largest
+    PIECE -- 18.9 mm against a true 31 mm; across fragmented studies size error
+    was 6.95 mm against 1.10 mm on clean ones, six times worse. And the
+    IMPRESSION, because "sixteen calculi" reads as stone burden rather than as
+    one staghorn.
+
+    THE TEST. Two pieces are one calculus when BOTH hold:
+
+      1. continuous material joins them -- they fall in the same connected
+         component of `vol >= bridge_hu`. Urine sits near 0-20 HU and
+         perinephric fat near -100, so a floor around 80 HU asks "is there stone
+         substance along the whole path between these", not "are they close".
+      2. their surfaces are within `gap_mm` (nearest voxel centre to nearest
+         voxel centre, so a 2-voxel empty gap at 1 mm spacing measures 3 mm).
+
+    Condition 1 does the work; condition 2 is the safety belt. If the bridge
+    mask ever leaks -- through a dense vessel wall, through soft tissue at the
+    hilum -- condition 1 alone would fuse two genuinely separate calyceal
+    stones, and reporting one stone where there are two is exactly the error
+    this function exists to undo, only inverted.
+
+    WHY NOT A MORPHOLOGICAL CLOSING. A closing joins any two pieces within its
+    radius whether or not anything lies between them. It cannot tell a staghorn
+    neck from two separate stones in adjacent calyces.
+
+    WHY NOT SAMPLE THE LINE between the closest pair of voxels. Tried first, and
+    it is unreliable: the closest pair is often a pair of corners, and the
+    straight line between corners can pass outside the neck entirely and read
+    0 HU through a genuine bridge. Component connectivity asks the same question
+    without depending on which pair happens to be nearest.
+
+    WHY THIS RUNS BEFORE MEASUREMENT. The merged object has to be measured as
+    one object, or the size stays wrong even once the count is right.
+
+    Union-find, because fragmentation is transitive: a staghorn is a chain of
+    lobes where A bridges to B and B to C without A ever touching C.
+
+    THE `forbid` GUARD, and why it is essential. This function and
+    split_touching_stones are exact opposites, so run naively one undoes the
+    other. split_touching_stones takes ONE component with two prominent peaks
+    and cuts it in two; the two halves are then adjacent and, having been one
+    >=130 HU object, are certainly joined by >=80 HU material -- so this
+    function would immediately weld them back together and the split would be
+    pointless.
+
+    The two operate in genuinely different regimes and that is what makes the
+    guard sound rather than a fudge:
+
+        joined at 130 HU, with a >=225 HU saddle between the peaks
+            -> two stones that partial volume fused    -> SPLIT
+        separate at 130 HU, but continuous at 80 HU
+            -> one calculus that partial volume broke   -> MERGE
+
+    So `forbid` maps label -> the pre-split parent it came from, and any two
+    labels sharing a parent are left alone: split_touching_stones has already
+    ruled on them with evidence this function does not have.
+
+    Returns (labels, peak_of, n_labels, n_merges) -- the same contract as
+    split_bone_bridges and split_touching_stones, including their convention
+    that the returned count is the number of labels present.
+    """
+    gap_mm = MERGE_MAX_GAP_MM if gap_mm is None else gap_mm
+    bridge_hu = MERGE_BRIDGE_HU if bridge_hu is None else bridge_hu
+    forbid = forbid or {}
+    if n < 2:
+        return labels, peak_of, n, 0
+
+    sp = np.asarray(spacing, float)
+    stats = cc3d.statistics(labels)
+    counts, bboxes = stats["voxel_counts"], stats["bounding_boxes"]
+    present = [i for i in range(1, len(counts)) if counts[i]]
+    if len(present) < 2:
+        return labels, peak_of, n, 0
+
+    # Crop to everything the labels occupy, plus the gap, so the bridge
+    # labelling costs a small box rather than the whole scan.
+    box = _pad_box(labels > 0, gap_mm + 2.0, spacing, labels.shape)
+    off = np.array([box[a].start for a in range(3)])
+    blab, _bn = cc3d.connected_components(vol[box] >= bridge_hu,
+                                          connectivity=26, return_N=True)
+
+    # which bridge component does each piece sit in? Majority vote, so one
+    # stray voxel at a piece's edge cannot decide it.
+    comp_of, pts, trees = {}, {}, {}
+    for i in present:
+        bb = bboxes[i]
+        sub = labels[bb] == i
+        idx = np.argwhere(sub) + [bb[a].start for a in range(3)]
+        pts[i] = idx * sp
+        trees[i] = cKDTree(pts[i])
+        loc = idx - off
+        vals = blab[loc[:, 0], loc[:, 1], loc[:, 2]]
+        vals = vals[vals > 0]
+        comp_of[i] = int(np.bincount(vals).argmax()) if len(vals) else 0
+
+    parent = {i: i for i in present}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    n_merges = 0
+    for ai, i in enumerate(present):
+        for j in present[ai + 1:]:
+            # split_touching_stones deliberately separated these two; it had
+            # saddle evidence this function does not. Leave them alone.
+            fi, fj = forbid.get(i), forbid.get(j)
+            if fi is not None and fi == fj:
+                continue
+            # condition 1: continuous material at >= bridge_hu
+            if not comp_of[i] or comp_of[i] != comp_of[j]:
+                continue
+            # cheap box reject before the exact surface distance
+            bi, bj = bboxes[i], bboxes[j]
+            far = False
+            for a in range(3):
+                sep = max(bi[a].start, bj[a].start) - min(bi[a].stop, bj[a].stop)
+                if sep > 0 and sep * sp[a] > gap_mm:
+                    far = True
+                    break
+            if far:
+                continue
+            # condition 2: surfaces actually within gap_mm
+            d, _k = trees[j].query(pts[i], workers=-1)
+            if float(d.min()) > gap_mm:
+                continue
+            ra, rb = find(i), find(j)
+            if ra != rb:
+                parent[rb] = ra
+                n_merges += 1
+
+    if not n_merges:
+        return labels, peak_of, n, 0
+
+    groups = {}
+    for i in present:
+        groups.setdefault(find(i), []).append(i)
+    remap = np.zeros(int(labels.max()) + 1, np.int32)
+    new_peak, next_id = {}, 0
+    for root, members in groups.items():
+        next_id += 1                       # increment BEFORE assigning, to match
+        for i in members:                  # split_bone_bridges' count convention
+            remap[i] = next_id
+        pk = [peak_of[i] for i in members if i in peak_of]
+        new_peak[next_id] = max(pk) if pk else 0.0
+    return remap[labels], new_peak, next_id, n_merges
+# WHAT THIS FUNCTION DOES: looks for pairs of separately-labelled blobs joined
+# by continuous stone material, and merges them, so a branched staghorn is
+# reported as one calculus of its true size instead of as a dozen smaller ones.
+
+
+def split_touching_stones(labels, n, peak_of, vol, spacing, voxel_mm3):
+    """Separate stones that partial volume has fused to EACH OTHER.
+
+    THE PROBLEM. Extent comes from GROW_HU (130) on the denoised volume. Two
+    stones a few mm apart are joined by a bridge of partial-volume voxels that
+    never drops below 130, so connected-component labelling returns ONE object.
+    Everything downstream then reports one stone: one size, one density, one
+    count -- and the density reported is the brightest of the group, so the
+    others vanish entirely.
+
+    Measured on 8677121, where the report describes three left ureteric calculi
+    (9.1x15.4 mm at the VUJ, 3.7x4.2 mm and 4.5x6.1 mm) sitting 6.3, 7.2 and
+    9.7 mm above the UVJ. We reported ONE stone of 12.3 mm and 285 mm3 -- larger
+    than the three objects combined (200 mm3), because it also contains the
+    bridging blur. Two of the three counted as misses.
+
+    Across 162 accepted ureteric detections, 22% contain more than one
+    stone-like peak, and the effect concentrates above 10 mm -- which is also
+    the band where our size error was worst (5.73 mm at 15 mm+, previously
+    attributed to staghorn fragmentation). Same phenomenon, seen from the other
+    side: a 20 mm "stone" in a 3-5 mm ureteric lumen was never one stone.
+
+    WHY THIS IS NOT JUST "FIND THE PEAKS". A branched staghorn calculus is ONE
+    stone with several lobes and several peaks. Splitting it would be as wrong
+    as merging. The discriminator is the SADDLE: two touching stones are joined
+    by a narrow, relatively dark neck, while one branched stone stays bright
+    throughout. So a second peak must clear the saddle between them by
+    TOUCH_PROMINENCE_HU before it is treated as a separate stone.
+
+    Contract matches split_bone_bridges: returns (labels, peak_of, next_id,
+    n_split) so it drops into either detector at the same point. Splitting
+    happens BEFORE any rejection, so each piece is judged on its own.
+    """
+    out = np.zeros_like(labels)
+    # next_id starts at 0 and is INCREMENTED BEFORE each assignment, matching
+    # split_bone_bridges. That makes the third return value the label COUNT, not
+    # the next free id -- the caller loops `range(1, n + 1)` and indexes
+    # stats["voxel_counts"][lab], so an off-by-one here walks off the end of the
+    # stats array. First version returned count+1 and crashed with
+    # "index 2 is out of bounds for axis 0 with size 2".
+    new_peak, next_id, n_split, n_unsplit = {}, 0, 0, 0
+    stats = cc3d.statistics(labels)
+    boxes = stats["bounding_boxes"]
+
+    for lab in range(1, n + 1):
+        bb = boxes[lab] if lab < len(boxes) else None
+        if bb is None:
+            continue
+        sl = tuple(bb)
+        comp = labels[sl] == lab
+        if not comp.any():
+            continue
+        sub = vol[sl]
+        # only worth attempting on blobs big enough to hold two stones
+        dmax_rough = max((sl[i].stop - sl[i].start) * spacing[i] for i in range(3))
+        pieces = None
+        if dmax_rough >= TOUCH_MIN_PARENT_MM:
+            pieces = _split_by_peaks(sub, comp, spacing)
+        if pieces is None:
+            next_id += 1
+            out[sl][comp] = next_id
+            new_peak[next_id] = peak_of.get(lab, float(sub[comp].max()))
+            continue
+        # A parent that shatters into many pieces is one branched calculus, not
+        # a cluster of touching stones. Revert to the whole object -- see
+        # TOUCH_MAX_PIECES.
+        big = [p for p in pieces
+               if float(p.sum()) * voxel_mm3 >= TOUCH_MIN_PIECE_MM3]
+        if len(big) > TOUCH_MAX_PIECES:
+            next_id += 1
+            out[sl][comp] = next_id
+            new_peak[next_id] = peak_of.get(lab, float(sub[comp].max()))
+            n_unsplit += 1
+            continue
+        n_split += 1
+        for piece in pieces:
+            if float(piece.sum()) * voxel_mm3 < TOUCH_MIN_PIECE_MM3:
+                continue
+            next_id += 1
+            out[sl][piece] = next_id
+            new_peak[next_id] = float(sub[piece].max())
+    # Reported as a function attribute rather than a fifth return value: the
+    # 4-tuple contract is shared with split_bone_bridges and depended on by two
+    # callers and four tests. A signature change to fwhm_measure once broke the
+    # ureteric detector while appearing to make it 7x faster, so signatures here
+    # are left alone unless there is no alternative.
+    split_touching_stones.last_unsplit = n_unsplit
+    return out, new_peak, next_id, n_split
+
+
+def _split_by_peaks(sub, comp, spacing):
+    """Watershed `comp` at its prominent intensity peaks. None if it is one stone."""
+    seeds = _prominent_peaks(sub, comp, spacing)
+    if len(seeds) < 2:
+        return None
+    markers = np.zeros(sub.shape, np.int32)
+    for i, c in enumerate(seeds, start=1):
+        markers[tuple(c)] = i
+    # watershed the NEGATIVE intensity: basins fill from each peak downhill and
+    # meet at the dark neck between the stones, which is exactly where the cut
+    # belongs. Restricted to `comp` so it cannot claim anything outside the blob.
+    ws = watershed(-sub, markers=markers, mask=comp)
+    pieces = [ws == i for i in range(1, len(seeds) + 1)]
+    return [p for p in pieces if p.any()]
+
+
+def _prominent_peaks(sub, comp, spacing):
+    """Local maxima inside `comp`, kept only if separated AND prominent.
+
+    Separation alone is not enough: noise on a single stone produces maxima a
+    few mm apart. The prominence test walks the straight line to the nearest
+    already-accepted peak and requires the darkest point on that line to sit
+    TOUCH_PROMINENCE_HU below the new peak -- i.e. a real dip, not a ripple.
+    """
+    fp = tuple(max(3, int(round(TOUCH_MIN_SEP_MM / s)) | 1) for s in spacing)
+    mx = ndimage.grey_dilation(sub, size=fp)
+    cand = np.argwhere(comp & (sub >= mx))
+    if len(cand) < 2:
+        return cand
+    vals = sub[tuple(cand.T)]
+    order = np.argsort(-vals)
+    cand, vals = cand[order], vals[order]
+    kept = [cand[0]]
+    for c, v in zip(cand[1:], vals[1:]):
+        near = min(kept, key=lambda k: np.linalg.norm((c - k) * np.asarray(spacing)))
+        if np.linalg.norm((c - near) * np.asarray(spacing)) < TOUCH_MIN_SEP_MM * 2:
+            continue
+        line = [np.rint(near + (c - near) * t).astype(int)
+                for t in np.linspace(0.0, 1.0, 16)]
+        saddle = min(float(sub[tuple(p)]) for p in line)
+        if float(v) - saddle >= TOUCH_PROMINENCE_HU:
+            kept.append(c)
+    return kept
 
 
 #code review for measurement
@@ -974,6 +1509,42 @@ def analyse(study_id, verbose=False, kidney_only=True, denoise=True):
     # component gets the chance to be judged as two separate objects
     labels, peak_of, n, n_bridges = split_bone_bridges(
         labels, n, peak_of, bone_dist, vol, voxel_mm3)
+    # ...then separate stones fused to each other. Relevant here too: "few
+    # calculi in the lower pole calyx" is a common report phrasing, and several
+    # stones in one calyx sit close enough for the 130 HU extent threshold to
+    # bridge them. It is also the likeliest explanation for the 5.73 mm size
+    # error in the 15 mm+ band, previously put down to staghorn fragmentation.
+    # Copied so the merge below can tell which labels split_touching_stones
+    # separated from a single parent. One int32 copy of the volume; the
+    # alternative is threading a provenance dict out of split_touching_stones,
+    # which would change a signature three tests and one caller depend on --
+    # and a signature change to fwhm_measure once broke the ureteric detector
+    # while looking like a 7x speedup.
+    pre_split = labels.copy()
+    labels, peak_of, n, n_touch = split_touching_stones(
+        labels, n, peak_of, vol, spacing, voxel_mm3)
+
+    # Which pre-split component did each label come from? Labels sharing one
+    # parent were deliberately cut apart and must not be welded back together.
+    sibling_of = {}
+    if n_touch:
+        _st = cc3d.statistics(labels)
+        for _i in range(1, len(_st["voxel_counts"])):
+            if not _st["voxel_counts"][_i]:
+                continue
+            _bb = _st["bounding_boxes"][_i]
+            _v = pre_split[_bb][labels[_bb] == _i]
+            _v = _v[_v > 0]
+            if len(_v):
+                sibling_of[_i] = int(np.bincount(_v).argmax())
+    del pre_split
+
+    # ...and now the OPPOSITE operation: rejoin one calculus that partial volume
+    # broke into pieces. A branched staghorn's arms join through necks thinner
+    # than a voxel, so they label separately and we reported 16 stones where
+    # 8662768's radiologist reported one 31 mm staghorn. See merge_fragments.
+    labels, peak_of, n, n_merge = merge_fragments(
+        labels, n, peak_of, vol, spacing, voxel_mm3, forbid=sibling_of)
     seed_labels = set(peak_of.keys())    # fast membership test in the loop
     grown = peak_of                      # `grown` now means "post-split peaks"
     stats = cc3d.statistics(labels)      # recomputed: labels changed above
@@ -982,6 +1553,12 @@ def analyse(study_id, verbose=False, kidney_only=True, denoise=True):
     for k in ("kidney_left", "kidney_right"):
         if k in masks:
             kidneys[k] = kidney_frame(masks[k], spacing)
+
+    # Per-side silhouette WITH the sinus filled, for the compartment test below.
+    # Per side rather than on the union so the side attribution stays exact even
+    # if two closings were ever to meet across the midline (a horseshoe kidney).
+    kidney_filled = {k: sinus_closed(masks[k], spacing, vol.shape)
+                     for k in kidneys}
 
     bladder = masks.get("urinary_bladder")   # may be None; checked before use
     rows, rejected = [], {}              # one row per candidate; tally of reasons
@@ -1059,12 +1636,28 @@ def analyse(study_id, verbose=False, kidney_only=True, denoise=True):
 
         # compartment + side
         comp_name, side, zone, tpos, conf = "unknown", "", "", np.nan, np.nan
+        in_collecting = False
         for k, (c, axis, world) in kidneys.items():
             if masks[k][cen_idx]:                  # centroid lands inside a kidney
                 comp_name = "kidney"
                 side = "left" if k.endswith("left") else "right"
                 zone, tpos, conf = polar_zone(cen_world, c, axis, world)
                 break
+        # SECOND CHANCE: the collecting system. The parenchyma mask has a hole
+        # where the sinus is, and that hole is where calyceal and pelvic stones
+        # actually sit -- see sinus_closed(). A stone in the filled silhouette
+        # but not in the parenchyma is intrarenal AND in the collecting system,
+        # which is the distinction that lets the report say "calyx" honestly
+        # instead of guessing.
+        if comp_name == "unknown":
+            for k, (c, axis, world) in kidneys.items():
+                f = kidney_filled.get(k)
+                if f is not None and f[cen_idx]:
+                    comp_name = "kidney"
+                    in_collecting = True
+                    side = "left" if k.endswith("left") else "right"
+                    zone, tpos, conf = polar_zone(cen_world, c, axis, world)
+                    break
         if comp_name == "unknown" and bladder is not None and bladder[cen_idx]:
             comp_name = "bladder"
         if comp_name == "unknown":                 # outside every labelled organ
@@ -1088,6 +1681,22 @@ def analyse(study_id, verbose=False, kidney_only=True, denoise=True):
             # clinician would count; rejected candidates carry the running value
             "stone_id": sum(1 for r in rows if r["reject_reason"] == "") + 1,
             "compartment": comp_name,
+            # Physical-plausibility flags -- see measurement_flags(). On the
+            # validation cohort these caught 8674625's 21.8 mm / 3071 HU object
+            # (report: 4.3 x 7 mm) and 8664550's 2965 HU (report: 1396 HU).
+            # They never reject; they say the number cannot be what it claims.
+            "measurement_flag": measurement_flags(pv_mm3, dmax,
+                                                  float(vol[sl][refined_sub].max())
+                                                  if refined_sub.any() else np.nan),
+            "fill_fraction": round(fill_fraction(pv_mm3, dmax), 4),
+            # True = the centroid is in the renal SINUS (collecting system:
+            # calyces and pelvis) rather than in parenchyma. This is what lets
+            # the report name a calyx: a stone in the collecting system at the
+            # mid third IS a mid-pole calyceal calculus, which is the phrase a
+            # radiologist uses. A stone genuinely inside parenchyma is a
+            # different finding (nephrocalcinosis, a calcified lesion) and must
+            # not be called a calyceal stone.
+            "in_collecting_system": bool(in_collecting),
             "reject_reason": reason,
             "is_stone": reason == "",
             # the value the no_dense_core test actually compared against
@@ -1138,6 +1747,16 @@ def analyse(study_id, verbose=False, kidney_only=True, denoise=True):
         **{f"rej_{k}": v for k, v in rejected.items()},
         "n_candidates_stage1": len(rows),
         "n_bone_bridges_split": n_bridges,
+        # how many blobs were separated into multiple stones. Recorded so a
+        # split is auditable: a study reporting 3 stones where 1 blob was found
+        # should say so, not silently show 3.
+        "n_touching_split": n_touch,
+        "n_fragments_merged": n_merge,
+        # components left WHOLE because they shattered into more than
+        # TOUCH_MAX_PIECES -- i.e. branched calculi the splitter would have
+        # shredded. On 8662768 this is the difference between 16 stones and 1.
+        "n_branched_kept_whole": getattr(split_touching_stones,
+                                         "last_unsplit", 0),
         "n_stones": len(kept),
         "bright_voxels_in_roi": n_bright_raw,
         # ACCEPTED stones only. Using `rows` here counted rejected candidates
