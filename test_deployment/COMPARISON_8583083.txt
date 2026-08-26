@@ -1,0 +1,57 @@
+STUDY 8583083  (iuid 1.2.840.113704.9.1000.16.0.20260725022816842)
+Variant: Plain   Reported: 2026-07-25   Run: 1002 s, 607 slices
+NOT in validation_cases.csv.
+
+REPORT: "Urinary Bladder:- three calculi are seen in the urinary bladder, the
+largest measuring approximately 17.37 x 17.0 mm (AP x TR) with density of
+1053 HU."  Nothing else is described.
+
+FIRST RUN RETURNED "Normal". That was not a miss, it was a fabricated answer --
+the report step crashed, the pipeline exited 0 anyway, and the API built a
+response out of files that did not exist. See the git log for the four defects.
+
+AFTER THE FIXES -- Abnormal, 12 calculi
+
+BLADDER (report: three)                    ours: five
+   the three reported stones, matched:
+     AP  9.8  TR 16.6  CC 15.4   1131 HU     report largest: AP 17.37 TR 17.0
+     AP  8.1  TR 15.6  CC 15.1   1136 HU                     1053 HU
+     AP  8.6  TR 14.1  CC 16.5   1149 HU
+   two extra, both flagged at_wall_thin:
+     AP  8.2  TR  8.6  CC 10.3    939 HU   fill_fraction 0.0049
+     AP  5.7  TR  7.1  CC  7.2    764 HU   fill_fraction 0.0068
+
+   TR agrees well: 16.6 against 17.0. DENSITY agrees: 1131-1149 against 1053,
+   about +8%.
+   AP DOES NOT: 9.8 against 17.37, roughly half, and all three of our AP values
+   sit at 8-10 mm while TR and CC sit at 14-17. Either these stones really are
+   flattened in AP, or our AP extent is being clipped. Worth a validator's eye;
+   it is the one measurement here that does not hang together.
+
+   The two extras have fill_fraction 0.005-0.007 against 0.045-0.061 for the
+   three real ones -- an order of magnitude apart. That is NOT being turned into
+   a rejection rule on the strength of one study: fitting a shape threshold to a
+   single case is exactly what made tubular_not_stone delete a real stone on
+   8664459. Flagged, left for validation.
+
+URETER (report: nothing)                   ours: seven
+     left  mid    CC 7.9   1274 HU   S2,  63 mm from UVJ
+     left  mid    CC 2.8    692 HU   S2,  71 mm from UVJ
+     right VUJ    CC 7.7    393 HU   S5,   0 mm from UVJ
+     left  upper  TR 11.2   508 HU   L2-L3, 177 mm
+     left  upper  CC 7.6    378 HU   L2,  184 mm
+     right mid    TR 4.7    519 HU   L5-S, 105 mm
+     left  upper  CC 2.0    316 HU   L3-L4, 147 mm
+
+   The report describes a bladder-focused read and does not mention the ureters
+   at all, so these seven are UNRESOLVED, not confirmed false. The 1274 HU one
+   is dense enough to be a real stone. This is precisely the unmeasured-precision
+   problem: 38 unmatched detections across the validation cohort and now seven
+   more, none of them adjudicated.
+
+KIDNEY: none detected, none reported.  Agrees.
+
+CONTROL: 8680690, a normal Plain study, returned Normal /
+assessed_no_calculus_detected with an empty calculi block and coronal_capture
+null. Correct, and it says "assessed" because it genuinely was -- which is the
+distinction the new guard exists to protect.

@@ -1,0 +1,7 @@
+study_id: 8680690
+variant: Plain
+created: 2026-07-31T16:28:36.616000+05:30
+calculus_flag: False
+
+calculus_line:
+nan

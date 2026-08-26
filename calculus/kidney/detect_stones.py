@@ -1952,9 +1952,22 @@ def main():
     # (NaN compartment, NaN stone_id) and the ureteric per-study summaries were
     # appended to baseline_summary.csv, giving 226 rows for 141 studies. That
     # corrupts the kidney stone table and double-counts studies in scoring.
+    # The filter above named only "_ureter_" and the bladder detector writes
+    # <id>_bladder_candidates.csv into the same folder, which "*_candidates.csv"
+    # matches just as happily. It stayed invisible only because the bladder
+    # erosion meant that file was always empty; the moment the erosion was fixed
+    # and 8583083 produced five bladder rows, they were merged into
+    # baseline_stones.csv -- the SAME corruption this comment describes, one
+    # compartment over. The kidney table then had rows with no `compartment`
+    # column at all, which crashed detect_stones' own summary and every report
+    # built from it.
+    #
+    # A tuple, so adding a fourth compartment cannot repeat this a third time.
+    FOREIGN = ("_ureter_", "_bladder_")
+
     def part1_only(pattern):
         return [f for f in sorted(glob.glob(os.path.join(per, pattern)))
-                if "_ureter_" not in os.path.basename(f)]
+                if not any(k in os.path.basename(f) for k in FOREIGN)]
 
     all_rows, summaries = [], []
     for f in part1_only("*_candidates.csv"):

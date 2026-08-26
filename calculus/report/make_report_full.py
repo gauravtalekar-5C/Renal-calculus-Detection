@@ -302,9 +302,15 @@ def build(sid, stones, ureter):
     find, vols = kidney_block(sid, k)
     lines = stone_lines(sid, k, u)
 
+    # The header count omitted the bladder, so 8583083 -- seven ureteric and
+    # five vesical calculi -- carried "Total calculi 7" above a table listing
+    # twelve. Counted from the same _bladder_lines the CALCULUS_BLADDER section
+    # below uses, so the two cannot disagree.
+    n_bl = len(_bladder_lines(sid))
     rows = [["HEADER", "Study ID", sid, "", "", "", ""],
             ["HEADER", "Study", "CT KUB PLAIN", "", "", "", ""],
-            ["HEADER", "Total calculi", len(k) + (len(u) if u is not None else 0),
+            ["HEADER", "Total calculi",
+             len(k) + (len(u) if u is not None else 0) + n_bl,
              "", "", "", ""],
             ["FINDINGS", "Side", "Size (in mm) : Volume (in cc)", "HUN/HN",
              "Calculus", "PFS", "Stent"]]

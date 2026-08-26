@@ -1,0 +1,28 @@
+{
+  "study_iuid": "1.2.840.113619.2.278.3.1628048786.971.1785484950.293",
+  "study_prediction": "Normal",
+  "findings": {
+    "study_prediction": "Normal",
+    "prediction_basis": "assessed_no_calculus_detected",
+    "env": "prod",
+    "model_version": "2026-08-25-validation-fixes",
+    "study": null,
+    "total_calculi": 0,
+    "calculi": {
+      "right": [],
+      "left": [],
+      "bladder": []
+    },
+    "coronal_capture": null,
+    "counts": {
+      "renal": 0,
+      "ureteric": 0,
+      "bladder": 0
+    },
+    "largest_calculus_mm": null,
+    "max_density_hu": null,
+    "slice_thickness_mm": 1.25,
+    "served_from_cache": true,
+    "seconds": 0.0
+  }
+}

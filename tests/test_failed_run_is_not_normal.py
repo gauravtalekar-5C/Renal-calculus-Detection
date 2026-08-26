@@ -64,3 +64,30 @@ def test_empty_study_csv_columns_are_a_real_subset():
     real = set(pd.read_csv(sample, nrows=0).columns)
     missing = set(CAND_COLS) - real
     assert not missing, f"CAND_COLS names columns a real run does not have: {missing}"
+
+
+def test_part1_only_excludes_every_other_compartment(tmp_path):
+    """The kidney table must contain kidney rows and nothing else.
+
+    detect_ureteric and detect_bladder write <id>_ureter_candidates.csv and
+    <id>_bladder_candidates.csv into the same directory, and the glob
+    "*_candidates.csv" matches both. The ureter case was found and fixed; the
+    bladder case was left, invisible only because the bladder erosion kept that
+    file empty. Fixing the erosion merged five bladder rows into
+    baseline_stones.csv on 8583083.
+    """
+    import glob as _glob
+    for name in ("81_candidates.csv", "81_ureter_candidates.csv",
+                 "81_bladder_candidates.csv"):
+        (tmp_path / name).write_text("study_id\n81\n")
+
+    from calculus.kidney.detect_stones import main as _  # noqa: F401  import check
+    import calculus.kidney.detect_stones as m
+    FOREIGN = ("_ureter_", "_bladder_")
+    got = [os.path.basename(f)
+           for f in sorted(_glob.glob(str(tmp_path / "*_candidates.csv")))
+           if not any(k in os.path.basename(f) for k in FOREIGN)]
+    assert got == ["81_candidates.csv"], got
+    # and the constant really is in the module, not just in this test
+    src = open(m.__file__).read()
+    assert 'FOREIGN = ("_ureter_", "_bladder_")' in src

@@ -1,0 +1,7 @@
+study_id: 8676809
+variant: Plain
+created: 2026-07-31T15:04:59.759000+05:30
+calculus_flag: True
+
+calculus_line:
+Approximately 6 x 3.3 mm sized calculus noted in left vesicoureteric Junction intravesically without definitive proximal hydroureteronephrosis on left side.
