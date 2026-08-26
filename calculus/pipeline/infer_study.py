@@ -56,15 +56,31 @@ from calculus.common.paths import CSV, NIFTI, RUN, SEG          # noqa: E402
 from calculus.pipeline.dicom_to_3d import (_allow_directories, pick_series, resolve,  # noqa: E402
                          segment, to_nifti)
 
-PY_BIN = os.path.join(ROOT, "venv", "bin", "python")
+# sys.executable, NOT a hardcoded venv path: this module is the production
+# entrypoint, so it has to work from an installed package or a clean clone
+# where ROOT/venv does not exist. Child stages must run in the SAME
+# interpreter that imported this file, or they get a different numpy/SimpleITK.
+PY_BIN = sys.executable
+
+
+STAGE_MODULES = {
+    "detect_stones.py":              "calculus.kidney.detect_stones",
+    "render_overlays.py":            "calculus.kidney.render_overlays",
+    "detect_ureteric.py":            "calculus.ureter.detect_ureteric",
+    "detect_bladder.py":             "calculus.bladder.detect_bladder",
+    "render_ureteric_overlays.py":   "calculus.ureter.render_ureteric_overlays",
+    "make_report.py":                "calculus.report.make_report",
+    "make_report_full.py":           "calculus.report.make_report_full",
+    "render_masks.py":               "calculus.common.render_masks",
+}
 
 
 def run(label, args, env=None):
     """Run one pipeline script, streaming nothing, reporting the outcome."""
     t0 = time.time()
     e = {**os.environ, "CALCULUS_RUN": RUN, **(env or {})}
-    r = subprocess.run([PY_BIN, "-u", os.path.join(HERE, args[0])] + args[1:],
-                       capture_output=True, text=True, env=e)
+    r = subprocess.run([PY_BIN, "-u", "-m", STAGE_MODULES[args[0]]] + args[1:],
+                       capture_output=True, text=True, env=e, cwd=ROOT)
     dt = time.time() - t0
     if r.returncode != 0:
         tail = (r.stderr or r.stdout or "").strip().splitlines()[-4:]
@@ -86,7 +102,8 @@ def summarise(sid):
         d = pd.read_csv(kp)
         k = d[d.study_id.astype(str) == sid]
     print(f"\nKIDNEY   {len(k)} stone(s)")
-    for r in k.sort_values("max_diameter_mm", ascending=False).itertuples():
+    for r in (k.sort_values("max_diameter_mm", ascending=False).itertuples()
+              if len(k) else []):
         loc = r.location or r.compartment
         print(f"   {r.side:5}  {r.max_diameter_mm:5.1f} mm  {int(r.hu_max):5} HU  "
               f"{loc}")
@@ -98,7 +115,8 @@ def summarise(sid):
         d = d[(d.study_id.astype(str) == sid) & d.is_stone.astype(bool)]
         u = d[d.report_this.astype(bool)] if "report_this" in d else d
     print(f"\nURETER   {len(u)} stone(s) ranked for report")
-    for r in u.sort_values("hu_max", ascending=False).itertuples():
+    for r in (u.sort_values("hu_max", ascending=False).itertuples()
+              if len(u) else []):
         d_uvj = (f"{r.dist_to_uvj_along_mm:.0f} mm from UVJ"
                  if pd.notna(r.dist_to_uvj_along_mm) else "distance unknown")
         print(f"   {r.side:5}  {r.max_diameter_mm:5.1f} mm  {int(r.hu_max):5} HU  "
@@ -150,6 +168,10 @@ def main():
               f"looking at, the sizes are less reliable")
     nii = to_nifti(sid, path, best["series_uid"], force=False)
     segment(sid, nii, device=a.device, force=False)
+    # The organ-mask QC sheet belongs HERE, not in a separate cohort sweep: it
+    # is the only thing standing between a mis-segmented kidney and a report
+    # full of confident numbers measured in the wrong place.
+    run("organ mask sheet", ["render_masks.py", "--studies", sid])
 
     # ---- 2. detection: BOTH compartments ---------------------------------
     print("\nDETECT")
@@ -162,6 +184,15 @@ def main():
     else:
         ok_u, _ = run("ureteric stones",
                       ["detect_ureteric.py", "--studies", sid] + extra)
+    # THE BLADDER IS A THIRD COMPARTMENT, and it must run in the per-study
+    # pipeline or it does not exist in production. It was added late and
+    # validated by hand; without this line a deployed run would search the
+    # kidney and the ureter and silently skip the bladder -- which is exactly
+    # the gap that let 8676429's 51 mm vesical calculus be reported as a 22 mm
+    # ureteric one, and 8674941's intravesical stone be missed entirely.
+    #
+    # Cheap: the ROI is one eroded organ mask, so it costs seconds, not minutes.
+    ok_b, _ = run("bladder stones", ["detect_bladder.py", "--studies", sid])
 
     # ---- 3. overlays and report tables -----------------------------------
     print("\nRENDER")
@@ -171,6 +202,7 @@ def main():
         run("ureteric sheet", ["render_ureteric_overlays.py", "--studies", sid,
                                "--rejected", "3", "--overwrite"])
     run("report tables", ["make_report.py", "--study", sid])
+    run("full report", ["make_report_full.py", "--study", sid])
 
     summarise(sid)
     print(f"\ntotal {time.time() - t0:.0f}s")
