@@ -63,3 +63,12 @@ experiments/__pycache__/
 
 # API run outputs: DICOMs, NIfTI, overlays, per-study CSVs
 api_runs/
+
+# Whole-cohort run: outputs are large, and cohort.csv quotes report text
+# verbatim (the same reason validation_cases.csv is untracked).
+final_whole_Data_analysis/cohort.csv
+final_whole_Data_analysis/ledger.csv
+final_whole_Data_analysis/json/
+final_whole_Data_analysis/runs/
+final_whole_Data_analysis/logs/
+final_whole_Data_analysis/progress.log
