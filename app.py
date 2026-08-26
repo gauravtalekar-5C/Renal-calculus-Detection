@@ -54,6 +54,8 @@ STATUS: this is a SECOND READER. It is not validated for autonomous reporting --
 n = 18 hand-picked studies, and the false-positive rate is unmeasured. See
 `limitations` in every response.
 """
+import base64
+import copy
 import json
 import os
 import queue
@@ -742,6 +744,42 @@ class Analyser:
         }
 
 
+def inline_captures(out, run):
+    """Replace every capture PATH with the base64 of the PNG itself.
+
+    Done at RESPONSE time, not when the result is shaped. The stored
+    result.json and responses.jsonl keep the paths: a coronal is ~300 KB, so
+    embedding the bytes would add roughly half a megabyte to every cached
+    record and to every audit-log line, for data already sitting on disk one
+    directory away. The cache stays small and greppable; the wire carries the
+    images.
+
+    A capture whose file has gone missing becomes null rather than an error.
+    The findings are the point of the response, and they are still correct
+    without a picture.
+    """
+    def enc(rel):
+        if not rel:
+            return None
+        try:
+            with open(os.path.join(run, rel), "rb") as fh:
+                return base64.b64encode(fh.read()).decode("ascii")
+        except OSError as e:
+            sys.stderr.write(f"{now()} capture unreadable {rel}: {e}\n")
+            return None
+
+    f = out.get("findings")
+    if not isinstance(f, dict):
+        return out
+    if "coronal_capture" in f:
+        f["coronal_capture"] = enc(f["coronal_capture"])
+    for side in ("right", "left", "bladder"):
+        for c in (f.get("calculi") or {}).get(side, []) or []:
+            if isinstance(c, dict) and "secondary_capture" in c:
+                c["secondary_capture"] = enc(c["secondary_capture"])
+    return out
+
+
 ANALYSER = Analyser()
 
 
@@ -840,12 +878,15 @@ class Handler(BaseHTTPRequestHandler):
             ev.wait()
             j = ANALYSER.get(job_id) or {}
             if j.get("status") == "done":
-                out = dict(j["result"])
+                out = copy.deepcopy(j["result"])
                 # The contract is {study_iuid, study_prediction, findings}.
                 # Anything extra goes INSIDE findings rather than beside it, so
                 # a strict consumer does not see unexpected top-level keys.
                 if isinstance(out.get("findings"), dict):
                     out["findings"]["seconds"] = j.get("seconds")
+                # the iuid IS the study id for API runs, so the run dir is
+                # derivable without threading it back through the job record
+                out = inline_captures(out, os.path.join(API_ROOT, env, iuid))
                 return self._json(200, out)
             return self._json(502, {"study_iuid": iuid, "env": env,
                                     "status": "error",

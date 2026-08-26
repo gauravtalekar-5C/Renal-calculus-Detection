@@ -127,7 +127,7 @@ def kidney_capture(sid, vol, spacing, row, n, out_dir):
                  fontsize=9)
     fig.tight_layout(rect=[0, 0, 1, 0.88])
     dest = os.path.join(out_dir, f"kidney_{n:02d}.png")
-    fig.savefig(dest, dpi=110)
+    fig.savefig(dest, dpi=110, pil_kwargs={"optimize": True})
     plt.close(fig)
     # Identity, not position. The report groups calculi right-side-then-left,
     # while these are written in CSV row order, so the two sequences disagree
@@ -189,7 +189,7 @@ def coronal_capture(sid, vol, spacing, ureteric, bladder, out_dir):
     ax.set_xticks([]); ax.set_yticks([])
     fig.tight_layout()
     dest = os.path.join(out_dir, "coronal.png")
-    fig.savefig(dest, dpi=110)
+    fig.savefig(dest, dpi=110, pil_kwargs={"optimize": True})
     plt.close(fig)
     return dest
 
