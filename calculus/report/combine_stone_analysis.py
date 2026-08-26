@@ -11,7 +11,8 @@ WHAT IS AND IS NOT COUNTED
 --------------------------
 Kidney rows come from baseline_stones.csv, which holds only accepted stones.
 Ureteric rows come from ureter_candidates.csv, which holds every candidate;
-only `is_stone` rows are taken, and `report_this` marks the top 2 per side.
+only `is_stone` rows are taken; `report_this` marks what the detector releases to
+the report (every accepted stone -- see detect_ureteric.TOP_K_REPORTED).
 
 The summary counts BOTH: `n_ureteric` is every accepted ureteric stone and
 `n_ureteric_reported` only the top-ranked ones. They differ a lot -- the
@@ -41,9 +42,10 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 from calculus.common.paths import CSV                      # noqa: E402
 
 COLS = ["study_id", "source", "stone_id", "side", "location",
+        "compartment", "in_collecting_system", "vertebral_level",
         "max_diameter_mm", "volume_mm3", "hu_max", "hu_mean",
         "dist_to_uvj_mm", "dist_from_puj_mm", "off_path_mm",
-        "report_this", "centroid_vox"]
+        "review_flag", "report_this", "centroid_vox"]
 
 
 def read(name):
@@ -74,6 +76,12 @@ def kidney_rows(d):
         "off_path_mm": pd.NA,
         # every row in baseline_stones.csv is an accepted stone, so all of them
         # are reportable; the audit trail for rejects is candidates.csv
+        "compartment": d.get("compartment"),
+        # carried through so make_report can name a calyx; without it the flag
+        # dies here and every calyceal stone prints as a bare third again
+        "in_collecting_system": d.get("in_collecting_system", False),
+        "vertebral_level": "",
+        "review_flag": "",
         "report_this": True,
         "centroid_vox": d.get("centroid_vox"),
     })
@@ -97,6 +105,10 @@ def ureteric_rows(d):
         "dist_to_uvj_mm": d.get("dist_to_uvj_along_mm"),
         "dist_from_puj_mm": d.get("dist_from_puj_along_mm"),
         "off_path_mm": d.get("off_path_mm"),
+        "compartment": "ureter",
+        "in_collecting_system": False,
+        "vertebral_level": d.get("vertebral_level", ""),
+        "review_flag": d.get("review_flag", ""),
         "report_this": d.get("report_this"),
         "centroid_vox": d.get("centroid_vox"),
     })

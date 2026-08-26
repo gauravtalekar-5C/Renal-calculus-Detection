@@ -54,7 +54,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # package root -> project root: calculus/<sub>/x.py is two levels down
 ROOT = os.path.dirname(os.path.dirname(HERE))
 from calculus.common.paths import CSV, RUN, SEG                              # noqa: E402
-from calculus.report.make_report import (NA, ZONE, ap_label, fmt_size,        # noqa: E402
+from calculus.report.make_report import (NA, ZONE, kidney_location, ap_label, fmt_size,        # noqa: E402
                          mask_dims_mm)
 
 # one folder for every per-study table, not two
@@ -68,6 +68,30 @@ UR_SHORT = {"upper": "upper", "mid": "mid", "lower": "lower", "vuj": "VUJ"}
 # any viewer that does not honour CSV quoting.
 UR_ZONE = {"upper": "Near PUJ", "mid": "Mid ureter",
            "lower": "Near VUJ", "vuj": "At VUJ"}
+
+
+def _assessable(sid):
+    """Whether detect_stones actually examined this study. See
+    make_report.kidney_assessable for the reasoning; duplicated as a small local
+    reader rather than importing, to keep the two report writers independent."""
+    p = os.path.join(CSV, "per_study", f"{sid}_summary.csv")
+    if not os.path.exists(p):
+        return True, ""
+    try:
+        d = pd.read_csv(p)
+    except Exception:
+        return True, ""
+    if not len(d):
+        return True, ""
+    err = str(d.iloc[0].get("error", "") or "").strip()
+    if not err:
+        return True, ""
+    low = err.lower()
+    if "enhanced" in low or "excretory" in low:
+        return False, "intravenous contrast present"
+    if "no segmentation" in low:
+        return False, "kidneys not segmented"
+    return False, err[:60]
 
 
 def kidney_block(sid, stones):
@@ -117,7 +141,7 @@ def stone_lines(sid, stones, ureter):
                      else str(r.compartment).replace("_", " ").title()
                      if pd.notna(r.compartment) else "Kidney")
             out[side].append([organ, size, int(r.hu_max),
-                              ZONE.get(r.location, r.location or NA), a])
+                              kidney_location(r), a])
     if ureter is not None and len(ureter):
         for r in ureter.itertuples():
             side = str(r.side or "").lower()
@@ -176,7 +200,17 @@ def impressions(sid, stones, ureter):
             out.append(f"{size} mm calculus ({int(r.hu_max)} HU) is present in "
                        f"the {r.side} ureter {where}{d}.")
     if not out:
-        out.append("No calculus detected in either kidney or ureter.")
+        # "No calculus detected" is only honest when we actually looked. On a
+        # contrast or excretory-phase scan the detector abstains, and this line
+        # would otherwise turn an abstention into a negative finding -- which is
+        # what happened to 6 of the 10 renal misses in the 54-study audit.
+        ok, note = _assessable(sid)
+        if ok:
+            out.append("No calculus detected in either kidney or ureter.")
+        else:
+            out.append(f"NOT ASSESSED for renal calculi ({note}). This study "
+                       "was not evaluated; absence of a finding here does NOT "
+                       "mean absence of a calculus.")
     # the honest footer -- these are absent from the model, not absent in the
     # patient, and a reader of the CSV alone must not infer otherwise
     out.append("NOT ASSESSED by this model: hydronephrosis, perinephric fat "
