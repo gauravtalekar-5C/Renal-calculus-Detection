@@ -78,7 +78,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 
 from calculus.kidney import detect_stones as ds                          # noqa: E402
-from calculus.ureter import ureter_corridor as uc                        # noqa: E402
+from calculus.ureter import ureter_corridor as uc
+from calculus.ureter import vertebral_level as vl                        # noqa: E402
 from calculus.common.paths import CSV, NIFTI, OVERLAYS, SEG         # noqa: E402
 
 # ---------------------------------------------------------------- thresholds
@@ -91,11 +92,33 @@ SEED_HU = ds.SEED_HU                # 200: every real stone must reach this
 MIN_VOL_MM3 = 0.5                   # below this is noise, not a stone
 MIN_DIAM_MM = 1.0                   # the reports go down to 1.1 mm, so must we
 # An upper bound is a real anatomical constraint in the URETER that does not
-# apply in the kidney. The ureter is 3-5 mm and dilates to maybe 15 mm; a
-# 30 mm staghorn fits in a renal pelvis but cannot sit in a ureter. The largest
-# ureteric stone in our 37 reports is 16 mm. Anything bigger is bone, bowel
-# content or a mis-merged component, so it is rejected rather than reported.
-MAX_DIAM_MM = 22.0
+# apply in the kidney: the ureter is 3-5 mm and dilates to maybe 15 mm, so a
+# very large object there is more likely bone, bowel content or a mis-merged
+# component than a stone.
+#
+# BUT THE OLD VALUE DELETED A REAL STONE, and it is worth being precise about
+# how. It was 22.0, chosen because "the largest ureteric stone in our 37 reports
+# is 16 mm" -- a bound fitted to the range of a small sample. On validation case
+# 8659576 the report describes an obstructing 21 mm calculus at 1466 HU in the
+# right mid ureter causing SEVERE hydronephrosis. We detected it cleanly:
+# 23.24 mm, 1561 HU, bone_frac 0.00, 7.5 mm off the centreline, correct side,
+# correct zone. It was then discarded for exceeding the cap by 1.2 mm.
+#
+# That is the most clinically urgent stone in the whole validation set, and the
+# report said "0 calculi on the right". A cap fitted to a small sample fails on
+# the first case outside it, and it fails SILENTLY -- nothing in the output says
+# "found and discarded".
+#
+# 8664459's report also describes a 26 x 12 x 8 mm distal ureteric calculus, so
+# 26 mm is not even the ceiling in this cohort of 17. Set well above anything
+# anatomically plausible; bone and bowel are already caught by bone_frac and the
+# vessel test, which is where that work belongs.
+MAX_DIAM_MM = 40.0
+
+# ...and keep the SIGNAL without the deletion. Anything above this is unusual
+# for a ureter and worth a human look, so it is marked for review and still
+# reported, rather than removed from the record.
+LARGE_FOR_URETER_MM = 20.0
 
 # DENSITY FLOOR, and it is the single most powerful filter in this module.
 #
@@ -131,7 +154,27 @@ HU_FLOOR = 300.0
 # and second in the fifth. A composite of log(HU), log(volume) and off-path
 # distance was tried and did WORSE (ranks 1,2,1,2,2), so the extra terms were
 # noise. Rank is reported, never used to discard: the audit CSV keeps everything.
-TOP_K_REPORTED = 2
+#
+# THE CAP IS OFF, and the rank column is now purely informational.
+#
+# It used to be 2, and that was defensible when it was set: ureteric precision
+# was 53.8%, so roughly half of what we reported was not a stone, and printing
+# only the two densest per side was the cheapest way to stop a radiologist
+# reading a page of noise. It suppressed false positives by suppressing output.
+#
+# The bone/L2-L4 mask fix, the refined-mask HU fix and the touching-stone
+# splitter removed the CAUSES of those false positives -- on 8677121, 214
+# candidates now resolve to 3 accepted with zero false positives. At that point
+# the cap stopped protecting the report and started censoring it: the third
+# left-sided stone, 428 HU against the radiologist's 425 HU, was detected,
+# measured, written to the audit CSV -- and then withheld, because it ranked
+# third. Three obstructing calculi in one ureter is a different clinical
+# situation from two, so that omission is a clinical error, not a tidy-up.
+#
+# If precision regresses, the fix is the cascade that admitted the false
+# positive, not a cap that hides however many happen to rank low. Set this to an
+# int to re-cap; None reports every accepted stone.
+TOP_K_REPORTED = None
 
 BONE_MIN_VOL_MM3 = ds.BONE_MIN_VOL_MM3
 BONE_MARGIN_MM = ds.BONE_MARGIN_MM
@@ -149,9 +192,194 @@ PHLEBOLITH_RIM_HU = -30.0           # shell this fatty -> not inside a ureter
 PHLEBOLITH_OFF_PATH_MM = 16.0       # this far off course -> probably not ureter
 PHLEBOLITH_AUTO_REJECT = 2          # cues needed before we drop it outright
 
+# ONE CUE IS ENOUGH WHEN THE OBJECT IS ALSO A TUBE.
+#
+# Measured across the 17 validation studies: 10 of 42 accepted ureteric "stones"
+# are BOTH elongated (< 0.45) AND sitting in fat (rim < -20 HU). Eight of them
+# are in 8633709, bilateral and symmetric 32-36 mm above the UVJ, 11-22 mm long,
+# 583-1025 HU, and 17-47 mm from any segmented vessel; two more are in 8675824,
+# on the LEFT, in a study whose report describes only a RIGHT-sided stone. In a
+# male pelvis that pattern is calcified vas deferens or pelvic phleboliths.
+#
+# The existing rule nearly caught them: `fatty_rim` fired on 6 of the 8, but
+# rejection needs two cues and `off_path` did not fire -- they sat 11-15 mm off
+# the centreline against a 16 mm threshold. One cue short, every time.
+#
+# The discriminating fact is not just the fat, it is the fat AROUND A TUBE. A
+# calculus inside a ureter is wrapped in ureteric wall, soft tissue at +30 to
+# +60 HU, and it is compact. These are wrapped in fat and shaped like a duct.
+# Requiring BOTH conditions is what keeps this off real stones: 8674625's
+# genuine 3.3 mm distal ureteric calculus is elongated (0.297) but has a rim of
+# +38 HU, and every confirmed VUJ stone in the cohort has a soft-tissue rim.
+MIMIC_ELONGATION = 0.45     # tube-shaped rather than lump-shaped
+MIMIC_RIM_HU = -20.0        # lying in fat, not in a ureteric wall
+
 # Shell used for the rim sign, in mm from the object surface. Thin enough to
 # sample the ureteric wall rather than whatever is beyond it.
 RIM_INNER_MM, RIM_OUTER_MM = 0.8, 2.5
+
+
+# --- URETERIC STENT ---------------------------------------------------------
+# NO VALIDATION DATA EXISTS FOR THIS RULE. Read that before trusting it.
+#
+# The validation cohort was built to include a "stent in situ" case and does
+# not contain one. 8633709 was selected by text-matching "stent" in the report
+# and the match was "CBD stent in situ with distal end in the second part of the
+# duodenum" -- a BILIARY stent, in the duodenum, nothing to do with the urinary
+# tract. The one genuine case, 8399313 ("Right-sided DJ ureteric stent is seen
+# in situ"), is 42 days old and past the API's ~33-day retention window, so it
+# could not be downloaded.
+#
+# So this rule is written from the anatomy and physics of the device, and it has
+# NEVER been tested against a positive example. It therefore only ever FLAGS.
+# It must not reject anything until a stent case has been seen, because a rule
+# fitted to zero examples deleting findings is exactly how MAX_DIAM_MM = 22 came
+# to remove a real 23.2 mm obstructing calculus.
+#
+# WHAT A DOUBLE-J STENT IS
+#   a polyurethane tube with barium filler, 24-30 CM long, 1.5-2.5 mm bore
+#   proximal end coils in the RENAL PELVIS, distal end coils in the BLADDER,
+#   the middle lies inside the URETER LUMEN
+#   it reads 300-1000+ HU, squarely in stone territory -- density cannot help
+#
+# WHAT DISTINGUISHES IT FROM A STONE
+#   a stone is FOCAL and COMPACT      3-30 mm, elongation typically > 0.4
+#   a stent is LONG and TUBULAR       200-300 mm, elongation ~0.1-0.3, and its
+#                                     length is 20-30x the cube root of its
+#                                     volume because it is a thin hollow tube
+#
+# AN APPROACH THAT DID NOT WORK, recorded so it is not retried: asking whether
+# dense material is present at every point along the ureteric CORRIDOR. Measured
+# on 8633709 the longest continuous dense run was 15-25 mm, against 15-30 mm for
+# plain stone studies -- no separation at all. The corridor centreline is a
+# geometric guess running 6-15 mm off the true ureter, so continuity measured
+# along it does not measure continuity along the ureter. Any future stent work
+# should measure the OBJECT, which is what this does.
+STENT_MIN_LEN_MM = 60.0        # far below a real stent's 240-300 mm, because a
+                               # stent fused to bone or clipped by the corridor
+                               # arrives in pieces; a stone never reaches this
+STENT_MAX_ELONGATION = 0.35    # minor/major axis: a tube, not a lump
+STENT_MIN_ASPECT = 8.0         # length / volume^(1/3); a stone sits at 1-3
+
+
+def stent_like(dmax_mm, volume_mm3, elongation):
+    """Does this object look like a segment of a ureteric stent? FLAG ONLY.
+
+    All three conditions must hold, because each alone has a real counterexample
+    in the cohort: an impacted 23 mm ureteric calculus is long, a calcified vas
+    deferens is elongated, and a thin partial-volume rind at a bone edge has a
+    high aspect ratio. Requiring all three is what keeps this from touching the
+    stones we currently get right.
+
+    Returns a reason string, or "" -- never a rejection. See the block comment
+    above for why this cannot reject until a stent case has been seen.
+    """
+    if not (np.isfinite(dmax_mm) and np.isfinite(volume_mm3) and volume_mm3 > 0):
+        return ""
+    if dmax_mm < STENT_MIN_LEN_MM:
+        return ""
+    if not np.isfinite(elongation) or elongation > STENT_MAX_ELONGATION:
+        return ""
+    if dmax_mm / max(volume_mm3 ** (1.0 / 3.0), 1e-6) < STENT_MIN_ASPECT:
+        return ""
+    return "stent_like"
+# WHAT THIS FUNCTION DOES: marks an object that is far too long, far too thin
+# and far too hollow to be a calculus, which is what a length of ureteric stent
+# looks like. It only ever adds a review flag.
+
+
+# --- THE VERDICT, AS PURE FUNCTIONS -----------------------------------------
+# WHY THESE ARE FUNCTIONS AND NOT INLINE CODE
+#
+# The rejection precedence used to be an if/elif chain written inline in the
+# candidate loop. Adding a flag-only test in the middle of it silently
+# reattached `elif hu_max < HU_FLOOR` to the new `if`, so the 300 HU density
+# floor only ran on candidates that were already rejected -- i.e. never. On
+# 8664459 that admitted five "calculi" at 156-293 HU, and nothing failed: no
+# exception, no test, just wrong output that looked plausible.
+#
+# Inline branching in a 200-line loop cannot be unit tested, so every edit to it
+# is a gamble. These functions are the single source of truth for the verdict,
+# they are covered by tests that assert the PRECEDENCE and not merely the
+# outcome, and the loop below only supplies measurements.
+#
+# The three tiers exist for speed: tier 0 is two array lookups, tier 1 needs the
+# FWHM measurement, tier 2 needs the expensive descriptors. On 8677121, 197 of
+# 214 candidates are settled by tier 0 alone. Splitting the verdict across three
+# functions preserves that while keeping each one testable.
+
+
+def verdict_cheap(bone_frac, vessel_mm):
+    """Tier 0: what two precomputed distance maps alone can decide.
+
+    Returns a reject reason, or "" to continue to tier 1.
+    """
+    if bone_frac > BONE_FRAC_REJECT:
+        return "bone"
+    if np.isfinite(vessel_mm) and vessel_mm < VESSEL_MARGIN_MM:
+        return "vascular_calcification"
+    return ""
+
+
+def verdict_measured(dmax, hu_max, volume_mm3=None):
+    """Tier 1: size and density, once the object has actually been measured.
+
+    Returns (reason, review_flag). `reason` rejects; `review_flag` never does.
+
+    ORDER MATTERS AND IS TESTED. The density floor comes BEFORE the
+    large-for-ureter flag, so a large object that is not dense is still
+    rejected -- putting the flag first is precisely the bug described above.
+
+    THE COMPACTNESS TEST, and why it applies only to LARGE objects.
+
+    Raising MAX_DIAM_MM from 22 to 40 recovered a real 21 mm obstructing stone
+    on 8659576 that the old cap had deleted. It also admitted large tubular
+    structures -- almost certainly pelvic vessels outside TotalSegmentator's
+    mask coverage -- in four studies. So the cap was doing two jobs at once, and
+    removing it kept the good one and lost the other.
+
+    Compactness restores the lost one without restoring the harm. Measured on
+    every accepted ureteric object over 20 mm across the 18 validation studies:
+
+        six false positives      fill 0.004 - 0.023
+        the one real 21 mm stone fill 0.145
+
+    A 6x gap. FILL_SUSPECT = 0.05 sits in it.
+
+    It is applied ONLY above LARGE_FOR_URETER_MM, deliberately. Small stones can
+    legitimately have a poor fill -- a 3 mm stone spans four voxels and its
+    caliper is quantised -- and rejecting on that would delete microliths. A
+    30 mm strand holding 200 mm3 is a different claim entirely.
+    """
+    if dmax < MIN_DIAM_MM:
+        return "too_small", ""
+    if dmax > MAX_DIAM_MM:
+        return "too_large_for_ureter", ""
+    if hu_max < HU_FLOOR:
+        return "below_hu_floor", ""
+    if dmax > LARGE_FOR_URETER_MM:
+        f = ds.fill_fraction(volume_mm3, dmax) if volume_mm3 is not None \
+            else float("nan")
+        if np.isfinite(f) and f < ds.FILL_SUSPECT:
+            return "tubular_not_stone", ""
+        return "", "large_for_ureter"
+    return "", ""
+
+
+def verdict_mimic(cues, tube_in_fat):
+    """Tier 2: the mimics. Returns a reject reason, or "".
+
+    A tube lying in fat is rejected on that alone -- see MIMIC_ELONGATION. Any
+    other two cues together also reject.
+    """
+    if tube_in_fat:
+        return "extraureteric_calcification"
+    if len(cues) >= PHLEBOLITH_AUTO_REJECT:
+        return "phlebolith_likely"
+    return ""
+# WHAT THESE FUNCTIONS DO: hold the entire decision about whether a dense object
+# in the ureteric corridor is a calculus, in one place, in the order the
+# evidence should be weighed, so the order can be tested rather than trusted.
 
 
 def _sphere(mm, spacing):
@@ -228,6 +456,10 @@ def analyse_ureter(study_id, verbose=False, denoise=True):
     if not sides:
         return [], {**summ, "error": "no corridor (kidney or bladder missing)"}
     bounds = uc.zone_bounds(masks)
+    # Vertebral spans, for the localisation the reports actually use ("at L4
+    # level"). One pass over the vertebral masks; see vertebral_level for why
+    # this replaces relying on the guessed UVJ landmark.
+    vspans = vl.spans(masks)
     summ["sides_with_corridor"] = ",".join(sorted(sides))
     summ["sacrum_landmarks"] = bool(bounds)
     summ["iliac_real"] = ",".join(f"{s}={sides[s]['iliac_real']}" for s in sides)
@@ -257,7 +489,8 @@ def analyse_ureter(study_id, verbose=False, denoise=True):
     big = np.zeros(dn + 1, bool)
     big[1:] = (cc3d.statistics(dlab)["voxel_counts"][1:] * voxel_mm3) >= BONE_MIN_VOL_MM3
     bone_seed = big[dlab]
-    for b in ("vertebrae_L1", "vertebrae_L5", "sacrum", "hip_left", "hip_right"):
+    for b in ("vertebrae_L1", "vertebrae_L2", "vertebrae_L3", "vertebrae_L4",
+              "vertebrae_L5", "sacrum", "hip_left", "hip_right"):
         if b in masks:
             bone_seed |= masks[b]
     bone_dist = ds.dist_mm(bone_seed, spacing)
@@ -334,23 +567,102 @@ def analyse_ureter(study_id, verbose=False, denoise=True):
     labels, peak_of, n, n_bridges = ds.split_bone_bridges(
         labels, int(labels.max()), peak_of, bone_dist, vol, voxel_mm3)
     summ["n_bone_bridges_split"] = n_bridges
+    # ...then separate stones fused to EACH OTHER. Order matters: bone first,
+    # because a stone welded to the sacrum must be freed from it before we ask
+    # whether it is one stone or two. Both run BEFORE any rejection, so every
+    # piece gets judged on its own evidence.
+    #
+    # On 8677121 the report describes three left ureteric calculi 6.3, 7.2 and
+    # 9.7 mm above the UVJ; the 130 HU bridge between them made two blobs, so
+    # one stone was invisible and the other two were reported oversized
+    # (11.7 mm where the report says 9.1 x 15.4, 9.7 mm where it says 4.5 x 6.1).
+    labels, peak_of, n, n_touch = ds.split_touching_stones(
+        labels, int(labels.max()), peak_of, vol, spacing, voxel_mm3)
+    summ["n_touching_split"] = n_touch
+
+    # A candidate is judged in THREE TIERS, cheapest evidence first.
+    #
+    # WHY THE ORDER MATTERS. Measured on 8677121: 214 candidates, of which 197
+    # die to `bone` and 14 to `below_hu_floor`. Only 3 survive. Before this
+    # restructure every one of those 211 first paid for an FWHM re-threshold, a
+    # marching-cubes surface, a convex hull, an O(N^2) caliper search, a rim
+    # shell and a lucency profile -- and the test that actually killed them was
+    # a single lookup in a precomputed distance map. The most expensive
+    # candidates were the worst offenders: the sprawling 21-40 mm partial-volume
+    # shells along the iliac wing and sacrum, all with bone_frac == 1.00.
+    #
+    # THE VERDICT CANNOT CHANGE. The tiers follow the rejection precedence
+    # exactly -- bone, then vascular_calcification (tier 0), then too_small,
+    # too_large_for_ureter, below_hu_floor (tier 1), then phlebolith_likely
+    # (tier 2). Because the chain is an if/elif, an earlier reason always won
+    # anyway; stopping early only skips work whose result was already discarded.
+    #
+    # WHAT DOES CHANGE, and it is a real cost: the DESCRIPTIVE columns of rows
+    # rejected at tier 0. Without an FWHM mask there is no refined object to
+    # measure, so those rows carry the coarse component's diameter, volume and
+    # HU rather than the refined ones, and `measure_stage` records which. The
+    # verdict, the side, the zone, the distances and bone_frac are unaffected.
+    # Anything comparing hu_max against hu_max_component must filter on
+    # measure_stage, because at tier 0 they are equal by construction.
+    #
+    # Hoisted out of the loop: `bone_seed | vessel` was a full-volume OR
+    # rebuilt once per candidate.
+    bone_or_vessel = bone_seed | vessel
+    margin = tuple(max(1, int(round(8.0 / s))) for s in spacing)
+
+    # ONE pass over the label image for every candidate's count, centroid and
+    # bounding box. The loop used to open with
+    #
+    #     for i in np.unique(labels):        # sorts 102 M int32
+    #         comp = labels == i             # reads 408 MB, writes 102 MB
+    #         nvox = int(comp.sum())         # scans 102 M voxels
+    #         idx = np.argwhere(comp)        # scans 102 M voxels
+    #
+    # i.e. three full sweeps of a 512x512x389 volume per candidate, 214 times,
+    # to locate blobs of 10-500 voxels. Profiling the tiered detector put 215 of
+    # its 299 seconds here -- while the geometry everyone assumes is expensive
+    # (marching cubes, convex hull, FWHM) measured 0.8-2.1 MILLISECONDS a call.
+    #
+    # cc3d.statistics returns all three quantities for all labels at once, and
+    # its bounding boxes come back as slice tuples ready to index with.
+    #
+    # AXIS ORDER IS VERIFIED, not assumed: the docstring says "x,y,z" and
+    # "xmin,xmax,...", which would be a silent catastrophe if it meant anything
+    # other than numpy axis 0,1,2 -- the centroid indexes dist_to_path and the
+    # zone classifier, so a transposed centroid reads the wrong voxel and
+    # mislabels the side. Checked on a deliberately asymmetric volume:
+    # cc3d centroid == np.argwhere(mask).mean(axis=0) exactly, and the bounding
+    # box slices == the mask's own extent.
+    stats = cc3d.statistics(labels)
+    counts, bboxes, centroids = (stats["voxel_counts"], stats["bounding_boxes"],
+                                 stats["centroids"])
 
     rows = []
-    for i in np.unique(labels):
-        if not i:
-            continue
-        comp = labels == i
-        nvox = int(comp.sum())
+    # ascending label order, exactly as np.unique gave, so candidate_id order
+    # and therefore CSV row order are unchanged
+    for i in range(1, len(counts)):
+        nvox = int(counts[i])
+        if not nvox:
+            continue                # a label erased by the seed test or a split
         vol_mm3 = nvox * voxel_mm3
         if vol_mm3 < MIN_VOL_MM3:
             continue
-        idx = np.argwhere(comp)
-        cen = idx.mean(axis=0)
+        cen = centroids[i]
+
+        # bb.start == idx.min() and bb.stop == idx.max() + 1, so this is the
+        # same box the argwhere version built, without the scan.
+        bb = bboxes[i]
+        sl = tuple(slice(max(0, int(bb[ax].start) - margin[ax]),
+                         min(vol.shape[ax], int(bb[ax].stop) + margin[ax]))
+                   for ax in range(3))
+        sub_vol = vol[sl]                       # a view, not a copy
+        comp_sub = labels[sl] == i              # small: the box, not the volume
+        cen_i = tuple(np.rint(cen).astype(int))
 
         # which side's corridor is this in, and how far off its centreline?
         best_side, off = None, np.inf
         for sname, sd in sides.items():
-            v = float(sd["dist_to_path"][tuple(np.rint(cen).astype(int))])
+            v = float(sd["dist_to_path"][cen_i])
             if v < off:
                 best_side, off = sname, v
         sd = sides[best_side]
@@ -362,57 +674,103 @@ def analyse_ureter(study_id, verbose=False, denoise=True):
         along_to_uvj = float(sd["arclen"][-1] - sd["arclen"][k])
         straight_to_uvj = float(np.linalg.norm((cen - sd["uvj"]) * np.asarray(spacing)))
         straight_to_puj = float(np.linalg.norm((cen - sd["puj"]) * np.asarray(spacing)))
-
-        # measurement, on the ORIGINAL volume, using Part 1's engine.
-        # crop_box wants a PER-AXIS padding in voxels, so 8 mm has to be
-        # converted separately for each axis -- slices are usually thicker
-        # than pixels, and a scalar would pad anisotropically.
-        margin = tuple(max(1, int(round(8.0 / s))) for s in spacing)
-        sl = ds.crop_box(comp, margin, vol.shape)
-        refined, thr, peak, bg, pv_mm3 = ds.fwhm_measure(vol, comp, spacing, sl)
-        full = np.zeros(vol.shape, bool)
-        full[sl] = refined
-        shape = ds.shape_metrics(vol[sl], refined, spacing, thr) or {}
-        dmax = shape.get("max_diameter_mm") or ds.max_diameter_mm(full, spacing)
-
-        # rejection features
-        bone_frac = float((bone_dist[comp] < BONE_MARGIN_MM).mean())
-        vessel_mm = (float(vessel_dist[tuple(np.rint(cen).astype(int))])
-                     if vessel_dist is not None else float("nan"))
-        rim, rim_n = rim_stats(vol[sl], refined, spacing,
-                               (bone_seed | vessel)[sl])
-        luc = lucency(vol[sl], refined, spacing)
-        elong = shape.get("elongation", float("nan"))
-
-        # phlebolith cues, counted not thresholded into a single verdict
-        cues = []
-        if np.isfinite(rim) and rim < PHLEBOLITH_RIM_HU:
-            cues.append("fatty_rim")
-        if off > PHLEBOLITH_OFF_PATH_MM:
-            cues.append("off_path")
-        if np.isfinite(luc) and luc < -60:
-            cues.append("lucent_centre")
-        if np.isfinite(elong) and elong > 0.85:
-            cues.append("round")
-
-        reason = ""
-        if bone_frac > BONE_FRAC_REJECT:
-            reason = "bone"
-        elif np.isfinite(vessel_mm) and vessel_mm < VESSEL_MARGIN_MM:
-            reason = "vascular_calcification"
-        elif dmax < MIN_DIAM_MM:
-            reason = "too_small"
-        elif dmax > MAX_DIAM_MM:
-            reason = "too_large_for_ureter"
-        elif float(vol[comp].max()) < HU_FLOOR:
-            reason = "below_hu_floor"
-        elif len(cues) >= PHLEBOLITH_AUTO_REJECT:
-            reason = "phlebolith_likely"
-
         zone = uc.classify_zone(int(round(cen[2])), bounds, along_to_uvj)
+
+        # ---- tier 0: two lookups in precomputed maps, no geometry ----------
+        bone_frac = float((bone_dist[sl][comp_sub] < BONE_MARGIN_MM).mean())
+        vessel_mm = (float(vessel_dist[cen_i])
+                     if vessel_dist is not None else float("nan"))
+
+        reason = verdict_cheap(bone_frac, vessel_mm)
+
+        # defaults for everything the later tiers would have filled in
+        stage = "coarse"
+        review = ""            # non-fatal "a human should look at this" marker
+        shape = {}
+        refined = None
+        dmax = ds.max_diameter_mm(comp_sub, spacing)
+        pv_mm3 = vol_mm3
+        hu_max = float(sub_vol[comp_sub].max())
+        hu_mean = float(sub_vol[comp_sub].mean())
+        rim, rim_n, luc, elong = float("nan"), 0, float("nan"), float("nan")
+        cues = []
+
+        if not reason:
+            # ---- tier 1: measurement. Needed for the size and HU tests. ----
+            stage = "refined"
+            # fwhm_measure takes a full-volume mask and crops it itself. Its
+            # signature is deliberately NOT changed -- doing that once before
+            # broke this detector while appearing to make it 7x faster, because
+            # the crash was mistaken for a speedup. Scattering the small box
+            # into a zero volume costs ~30 ms and happens only for the handful
+            # of candidates that get this far (17 of 214 on 8677121), where
+            # `labels == i` would have read the whole label image again.
+            comp = np.zeros(vol.shape, bool)
+            comp[sl] = comp_sub
+            refined, thr, peak, bg, pv_mm3 = ds.fwhm_measure(
+                vol, comp, spacing, sl)
+            shape = ds.shape_metrics(sub_vol, refined, spacing, thr) or {}
+            # max_diameter_mm on the CROPPED mask: a caliper is translation
+            # invariant, so cropping cannot change it, and the full-volume
+            # version rescanned 137 M voxels to find the same points.
+            dmax = shape.get("max_diameter_mm") or ds.max_diameter_mm(refined,
+                                                                     spacing)
+            # BOTH on the refined mask. They used to be measured on DIFFERENT
+            # objects -- hu_max over the coarse >=GROW_HU component and hu_mean
+            # over the FWHM-refined stone. On 8677121 that made hu_mean EXCEED
+            # hu_max in 125 of 144 rows, which is arithmetically impossible for
+            # one object and proves they described different ones. The coarse
+            # component is threshold-shaped and can clip a stone's bright core;
+            # the refined mask is the object we actually report, so it is the
+            # one to measure. hu_max_component is kept for traceability.
+            if refined.any():
+                hu_max = float(sub_vol[refined].max())
+                hu_mean = float(sub_vol[refined].mean())
+
+            reason, review = verdict_measured(dmax, hu_max, pv_mm3)
+
+            # FLAG-ONLY, strictly after the verdict so it cannot alter one.
+            # stent_like has no validation data; see stent_like().
+            if not reason:
+                sl_flag = stent_like(dmax, pv_mm3,
+                                     shape.get("elongation", float("nan")))
+                if sl_flag:
+                    review = (review + ";" + sl_flag) if review else sl_flag
+                # physical-plausibility flags: see ds.measurement_flags
+                mf = ds.measurement_flags(pv_mm3, dmax, hu_max)
+                if mf:
+                    review = (review + ";" + mf) if review else mf
+
+        if not reason:
+            # ---- tier 2: the phlebolith cues, the expensive descriptors -----
+            stage = "full"
+            rim, rim_n = rim_stats(sub_vol, refined, spacing, bone_or_vessel[sl])
+            luc = lucency(sub_vol, refined, spacing)
+            elong = shape.get("elongation", float("nan"))
+
+            # counted, not thresholded into a single verdict
+            if np.isfinite(rim) and rim < PHLEBOLITH_RIM_HU:
+                cues.append("fatty_rim")
+            if off > PHLEBOLITH_OFF_PATH_MM:
+                cues.append("off_path")
+            if np.isfinite(luc) and luc < -60:
+                cues.append("lucent_centre")
+            if np.isfinite(elong) and elong > 0.85:
+                cues.append("round")
+            # A tube lying in fat is not a calculus, whatever else is true of
+            # it. See MIMIC_ELONGATION for the measurement behind this.
+            tube_in_fat = bool(np.isfinite(elong) and elong < MIMIC_ELONGATION
+                               and np.isfinite(rim) and rim < MIMIC_RIM_HU)
+            if tube_in_fat:
+                cues.append("tube_in_fat")
+            reason = verdict_mimic(cues, tube_in_fat)
+
         rows.append({
             "study_id": sid, "candidate_id": int(i), "side": best_side,
             "zone": zone,
+            # Objective localisation against bone -- independent of the UVJ
+            # landmark, which was 49 mm out on 8676809's distended bladder.
+            "vertebral_level": vl.level_at(cen[2], vspans),
             "dist_to_uvj_along_mm": round(along_to_uvj, 1),
             "dist_to_uvj_straight_mm": round(straight_to_uvj, 1),
             "dist_from_puj_along_mm": round(along_from_puj, 1),
@@ -422,8 +780,15 @@ def analyse_ureter(study_id, verbose=False, denoise=True):
             "dim_tr_mm": round(shape.get("dim_tr_mm", float("nan")), 2),
             "dim_ap_mm": round(shape.get("dim_ap_mm", float("nan")), 2),
             "dim_cc_mm": round(shape.get("dim_cc_mm", float("nan")), 2),
-            "hu_max": round(float(vol[comp].max())),
-            "hu_mean": round(float(vol[full].mean()) if full.any() else np.nan),
+            "hu_max": round(hu_max),
+            "hu_mean": round(hu_mean),
+            "hu_max_component": round(float(sub_vol[comp_sub].max())),
+            # How far this candidate got before a verdict was reached, so the
+            # columns above can be read for what they are. "coarse" = rejected
+            # on the >=GROW_HU component alone, no FWHM mask exists;
+            # "refined" = measured, then rejected on size or density;
+            # "full" = every descriptor computed.
+            "measure_stage": stage,
             "off_path_mm": round(off, 1),
             "rim_hu": round(rim, 1) if np.isfinite(rim) else None,
             "rim_voxels": rim_n,
@@ -434,19 +799,24 @@ def analyse_ureter(study_id, verbose=False, denoise=True):
             "phlebolith_cues": ";".join(cues),
             "n_phlebolith_cues": len(cues),
             "reject_reason": reason,
+            # Reported AND flagged. Distinct from reject_reason: a review flag
+            # never removes a finding, it only asks for a second look.
+            "review_flag": review,
             "is_stone": reason == "",
             "centroid_vox": ",".join(str(int(round(c))) for c in cen),
         })
 
-    # rank the survivors by density, highest first, per side. Reported not
-    # applied -- rank 1-2 is what goes in the report, the rest stay auditable.
+    # rank the survivors by density, highest first, per side. The rank is now
+    # informational only -- with TOP_K_REPORTED off, every accepted stone is
+    # reported and every candidate stays in the audit CSV either way.
     stones = [r for r in rows if r["is_stone"]]
     for side in ("left", "right"):
         ss = sorted([r for r in stones if r["side"] == side],
                     key=lambda r: -r["hu_max"])
         for k, r in enumerate(ss, 1):
             r["hu_rank_side"] = k
-            r["report_this"] = k <= TOP_K_REPORTED
+            r["report_this"] = (TOP_K_REPORTED is None
+                                or k <= TOP_K_REPORTED)
     summ.update({
         "n_candidates": len(rows),
         "n_stones": len(stones),
@@ -458,6 +828,13 @@ def analyse_ureter(study_id, verbose=False, denoise=True):
         "n_rejected_small": sum(r["reject_reason"] == "too_small" for r in rows),
         "n_rejected_large": sum(r["reject_reason"] == "too_large_for_ureter"
                                 for r in rows),
+        # The floor was the second-biggest bucket on 8677121 (14 of 214) and had
+        # no counter, so it was invisible in the summary sheet.
+        "n_rejected_floor": sum(r["reject_reason"] == "below_hu_floor"
+                                for r in rows),
+        # How much geometry the study actually paid for. n_measured is the
+        # candidates that reached tier 1; the rest were settled by two lookups.
+        "n_measured": sum(r["measure_stage"] != "coarse" for r in rows),
         "largest_stone_mm": round(max((r["max_diameter_mm"] for r in stones),
                                       default=0.0), 2),
         "sides_with_stone": ",".join(sorted({r["side"] for r in stones})),
