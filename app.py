@@ -71,6 +71,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pandas as pd
 
+from calculus.report.reconcile import reconcile
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 
@@ -724,6 +726,19 @@ class Analyser:
         #       which algorithm produced a stored result. Without it, a result in
         #       your database cannot be attributed to a version, and today alone
         #       the detection logic changed ten times.
+        # RECONCILE before answering. The detector CSVs and the report are two
+        # independent records of the same study; until 8583083 nothing compared
+        # them, so seven detected ureteric calculi could become "Normal" with
+        # no code noticing. This raises only for the unambiguous case --
+        # something detected, nothing reported -- because a check that fires on
+        # legitimate deduplication is a check somebody switches off. See
+        # calculus/report/reconcile.py for why the invariant is deliberately
+        # weak.
+        ok, why, delta = reconcile(run, sid, total, counts)
+        if not ok:
+            raise RuntimeError(why + f"  [detector CSVs: {delta['accepted']}; "
+                               f"report: {os.path.join(rep, sid)}_report.csv]")
+
         return {
             "study_iuid": iuid,
             "study_prediction": prediction,

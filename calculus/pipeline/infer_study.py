@@ -218,8 +218,30 @@ def main():
     # study in which the pipeline had just detected seven ureteric calculi.
     #
     # A missing answer must be an error, never a negative finding.
-    if not (ok_r and ok_f):
-        print("\nFAILED: the report tables were not produced, so this study "
+    # The same reconciliation the API performs, so a CLI run cannot quietly
+    # produce a report that contradicts its own detector CSVs.
+    ok_rec = True
+    try:
+        from calculus.report.reconcile import accepted_counts
+        acc = accepted_counts(RUN, sid)
+        rep_csv = os.path.join(RUN, "reports", f"{sid}_calculi.csv")
+        n_rep = 0
+        if os.path.exists(rep_csv):
+            import pandas as _pd
+            n_rep = len(_pd.read_csv(rep_csv))
+        if sum(acc.values()) > 0 and n_rep == 0:
+            ok_rec = False
+            print(f"\nRECONCILE FAILED: detectors accepted {acc} but the "
+                  f"report table lists 0 calculi. Findings cannot vanish "
+                  f"between detection and reporting.")
+    except Exception as e:                       # never mask the real outcome
+        print(f"\n  (reconcile check could not run: {type(e).__name__}: {e})")
+
+    if not (ok_r and ok_f and ok_rec):
+        print("\nFAILED: this study has no trustworthy result. Exiting "
+              "nonzero so no caller mistakes the absence of findings for an "
+              "absence of disease.")
+        print("FAILED: the report tables were not produced, so this study "
               "has NO result. Exiting nonzero so no caller mistakes the "
               "absence of findings for an absence of disease.")
         sys.exit(1)
