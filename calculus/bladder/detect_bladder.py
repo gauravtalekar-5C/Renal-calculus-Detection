@@ -98,6 +98,29 @@ SEED_HU = ds.SEED_HU
 # docstring. It was WALL_ERODE_MM = 3.0 and it silently deleted every dependent
 # stone.
 WALL_FLAG_MM = 3.0
+
+# Minimum fill_fraction for a bladder candidate to be called a stone.
+#
+# EVIDENCE, from 331 cohort studies -- not from one case, which is how the
+# erosion above got changed wrongly. In studies whose report names NO calculus
+# we accepted 1117 bladder detections across 121 studies, a median of 7 each.
+# Their fill_fraction is 0.0105 and their caliper is 4.6x the diameter their own
+# volume implies: a "14 mm stone" holding 5 mm3 of voxels.
+#
+# fill_fraction does NOT separate individual detections -- pooled medians are
+# 0.0095 in reported-bladder studies against 0.0098 in reported-clean ones,
+# because BOTH are full of streak. It separates STUDIES: a clean study contains
+# only streak, a positive study contains streak plus one compact stone. Measured
+# per study at this threshold: all 7 reported-bladder studies keep a detection,
+# while bladder-flagged clean studies fall from 121 to 15.
+#
+# 0.04 and not FILL_SUSPECT's 0.05 for one reason, stated because it is the
+# weakest part of this: the smallest CONFIRMED real bladder stone in the cohort
+# (8583083, third calculus, 1136 HU) measures 0.0453, and 0.05 would delete it.
+# That is a threshold sitting 12% away from a known true positive, fitted on
+# SEVEN positive studies. It is the best the available data supports and it
+# should be re-derived the moment there are more.
+BLADDER_FILL_MIN = 0.04
 MIN_DIAM_MM = 1.5        # same as the kidney: reports go down to ~1.1 mm
 MIN_VOL_MM3 = 0.5
 # NO MAX. See the module docstring.
@@ -279,6 +302,7 @@ def analyse(study_id, verbose=False, denoise=True):
             np.array(ndimage.center_of_mass(comp_sub))
             + [bb[a].start for a in range(3)]).astype(int))])
 
+        fill = ds.fill_fraction(pv, dmax)
         reason = ""
         if dmax < MIN_DIAM_MM:
             reason = "too_small"
@@ -296,6 +320,12 @@ def analyse(study_id, verbose=False, denoise=True):
         # calculi in this cohort read 331 and 724 HU, nowhere near it.
         elif hu_max > ds.HU_IMPLAUSIBLE:
             reason = "not_calculus_density"
+        # STREAK, not stone. See BLADDER_FILL_MIN. This is a rejection and not a
+        # flag because flagging was already tried: at_wall_thin correctly marked
+        # 354 of 373 sampled false detections and changed nothing, since nothing
+        # downstream acts on a flag -- the API counts a flagged stone as a stone.
+        elif np.isfinite(fill) and fill < BLADDER_FILL_MIN:
+            reason = "streak_not_stone"
 
         review = []
         # a Foley balloon: large, and darker inside than at its edge
@@ -326,7 +356,7 @@ def analyse(study_id, verbose=False, denoise=True):
             "hu_max": round(hu_max), "hu_mean": round(hu_mean),
             "elongation": (round(float(shape["elongation"]), 3)
                            if "elongation" in shape else None),
-            "fill_fraction": round(ds.fill_fraction(pv, dmax), 4),
+            "fill_fraction": round(fill, 4),
             "dependent_frac": round(dep, 2),
             "lucency_hu": round(luc, 1) if np.isfinite(luc) else None,
             "wall_dist_mm": round(wd, 1),
