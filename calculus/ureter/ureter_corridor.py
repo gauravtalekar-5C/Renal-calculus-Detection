@@ -50,6 +50,8 @@ Every "medial", "lateral", "posterior" below is written against that.
 
 
 
+import os
+
 import numpy as np
 from scipy import ndimage
 
@@ -58,7 +60,27 @@ from scipy import ndimage
 # and a MISSED stone cannot be recovered downstream whereas a false positive
 # can still be rejected on shape, density and bone/vessel proximity. Tighten
 # this only after measuring what it costs in sensitivity.
-CORRIDOR_MM = 20.0
+# THE CORRIDOR RADIUS IS THE BINDING CONSTRAINT ON URETERIC RECALL, and the
+# evidence is the shape of the data rather than any median. Off-path distance for
+# accepted ureteric detections:
+#
+#     p50 17.5   p75 18.4   p90 18.9   p95 19.2   p100 19.6 mm
+#
+# against a radius of 20.0. The maximum observed sits 0.4 mm inside the cutoff
+# and 30% of detections lie within 2 mm of it. A distribution that stops dead at
+# a hard boundary is CENSORED: stones beyond the boundary are not rare, they are
+# invisible -- never proposed, so never counted as missed.
+#
+# That is consistent with the 19% of studies whose reported ureteric calculus we
+# miss completely, and it is NOT explained by the bone rejection (the 65,904
+# bone-rejected candidates are 2.1 mm at 267 HU, statistically identical in
+# studies with and without a reported stone) nor by the centreline being in the
+# wrong place (confirmed stones sit 7.5-19.6 mm off it, and moving the path lost
+# a confirmed 23 mm calculus).
+#
+# Env-overridable so the radius/false-positive trade can be measured rather than
+# argued about.
+CORRIDOR_MM = float(os.environ.get("CALCULUS_CORRIDOR_MM", 20.0))
 
 UVJ_BASE_FRAC = 0.35
 

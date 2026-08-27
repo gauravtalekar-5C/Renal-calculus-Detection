@@ -613,13 +613,34 @@ def calculi_rows(sid, stones):
     return rows
 
 
-ZONE_UR = {"upper": "upper", "mid": "mid", "lower": "lower", "vuj": "VUJ"}
-# Anatomical wording for the Location column. A bare "Distance from UVJ: 230 mm"
-# is precise but unreadable at a glance -- a reporting radiologist wants "near
-# the PUJ", which is the phrasing the urology report uses. The number stays,
-# because the zone alone loses the position within the zone.
-ZONE_TEXT = {"upper": "Near PUJ", "mid": "Mid ureter",
-             "lower": "Near VUJ", "vuj": "At VUJ"}
+# THREE REPORTED ZONES, NOT FOUR, AND NO DISTANCE.
+#
+# The four-zone scheme distinguished "lower ureter" from "at the VUJ". Measured
+# against 66 cohort reports that name a ureteric zone, that distinction is one we
+# cannot make:
+#
+#     report says upper    88% agree
+#     report says lower    74% agree
+#     report says VUJ      38% agree   <- and VUJ is the commonest, n=37
+#
+# and the disagreements run one way: the radiologist says VUJ, we say "lower" or
+# "mid". Merging the two into DISTAL takes that from 38% to 87% and the whole
+# scheme from 74% to 85%. Collapsing further to proximal/distal gains one point
+# (86%) and throws away a distinction we can make, so three it is.
+#
+# The distance is GONE from the reported location. It was already labelled
+# approximate, and it is derived from an interpolated centreline that sits ~16 mm
+# from the calculi it is meant to contain -- measured over 331 studies,
+# off_path_mm 16.5 mm for radiologist-confirmed stones against 15.6 mm for
+# mimics. A number printed to the millimetre off a line that wrong reads as a
+# measurement and is not one. It stays in the CSV for audit, where its
+# provenance is visible.
+#
+# The VERTEBRAL LEVEL stays, and leads: it is read off the vertebral and sacral
+# masks and owes nothing to the corridor.
+ZONE_UR = {"upper": "upper", "mid": "mid", "lower": "distal", "vuj": "distal"}
+ZONE_TEXT = {"upper": "Upper ureter (near PUJ)", "mid": "Mid ureter",
+             "lower": "Distal ureter", "vuj": "Distal ureter"}
 
 
 def ureteric_rows(sid, ucand):
@@ -674,11 +695,8 @@ def ureteric_rows(sid, ucand):
             bits.append(f"{lvl} level")
         if zt:
             bits.append(zt)
-        if d is not None and pd.notna(d):
-            # kept, but last and explicitly marked approximate -- it is the
-            # right quantity for planning retrograde access and will become
-            # trustworthy once the landmark is validated against a click
-            bits.append(f"~{float(d):.0f} mm from UVJ")
+        # The distance is deliberately NOT printed here -- see ZONE_UR above.
+        # It remains in <sid>_ureter_candidates.csv for anyone auditing.
         loc = " - ".join(bits) if bits else NA
         rows.append({
             "study_id": sid,

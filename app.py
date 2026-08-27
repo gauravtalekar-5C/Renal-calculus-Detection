@@ -98,6 +98,14 @@ MAX_IUID_LEN = 128
 
 MODEL_VERSION = "2026-08-25-validation-fixes"
 
+# Path prefixes a reverse proxy may or may not strip. Deployment serves this at
+# https://ct-models.5cn.co.in/renal/, so /renal/analyze and /analyze must both
+# reach the same handler.
+PROXY_PREFIXES = tuple(
+    p if p.endswith("/") else p + "/"
+    for p in os.environ.get("CALCULUS_API_PREFIXES", "/renal/,/calculus/").split(",")
+    if p.strip())
+
 # The response contract has its own version, separate from the model's. A caller
 # needs to know when the SHAPE changed independently of when the weights or
 # thresholds changed -- otherwise every model update looks like a possible
@@ -874,20 +882,51 @@ class Handler(BaseHTTPRequestHandler):
                              "StudyInstanceUID, e.g. 1.2.840.113619.2.55.3...")
         return v
 
+    # -- routing -----------------------------------------------------------
+    @staticmethod
+    def route(path):
+        """The request path, with any reverse-proxy prefix removed.
+
+        Deployment fronts this at https://ct-models.5cn.co.in/renal/, and
+        whether a proxy strips its own prefix before forwarding is a matter of
+        configuration, not of standard: nginx `proxy_pass http://host:8123/`
+        strips it, `proxy_pass http://host:8123` does not. Both must work, or
+        the service 404s for a reason nobody can see from the outside.
+
+        A bare "" or "/" is treated as /analyze, because POSTing to the service
+        root is what the deployment URL invites and answering 404 to it would be
+        pedantry. GET / is still the health page -- the method separates them.
+        """
+        q = (path or "/").split("?", 1)[0]
+        for pref in PROXY_PREFIXES:
+            if q == pref or q == pref.rstrip("/"):
+                q = "/"
+                break
+            if q.startswith(pref):
+                q = "/" + q[len(pref):].lstrip("/")
+                break
+        q = "/" + q.strip("/")
+        return "/analyze" if q == "/" else q
+
     # -- routes ------------------------------------------------------------
     def do_GET(self):
-        if self.path in ("/health", "/"):
+        path = self.route(self.path)
+        # GET on the service root is the health page, not an analysis
+        if self.path.split("?")[0].strip("/") in ("", "health") or \
+           path in ("/health", "/analyze") and self.command == "GET" and \
+           not self.path.rstrip("/").endswith("analyze"):
             return self._json(200, {
                 "status": "ok", "model_version": MODEL_VERSION,
                 "time": now(), "queue": ANALYSER.status(),
                 "note": "second reader; see /analyze response 'limitations'",
                 "endpoints": ["POST /analyze", "POST /jobs", "GET /jobs/<id>",
                               "GET /health"]})
-        if self.path.startswith("/jobs/"):
-            j = ANALYSER.get(self.path.rsplit("/", 1)[-1])
+        if path.startswith("/jobs/"):
+            j = ANALYSER.get(path.rsplit("/", 1)[-1])
             return self._json(200 if j else 404,
                               j or {"error": "unknown job_id"})
-        return self._json(404, {"error": "not found", "path": self.path})
+        return self._json(404, {"error": "not found", "path": self.path,
+                                "resolved": path})
 
     def do_POST(self):
         try:
@@ -902,7 +941,8 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._json(400, {"error": "body must be JSON"})
 
-        if self.path == "/jobs":
+        path = self.route(self.path)
+        if path == "/jobs":
             job_id, _ = ANALYSER.submit(iuid, env, force)
             return self._json(202, {
                 "job_id": job_id, "study_iuid": iuid, "env": env,
@@ -911,7 +951,7 @@ class Handler(BaseHTTPRequestHandler):
                 "note": "a full analysis takes roughly 11 minutes; one study "
                         "runs at a time"})
 
-        if self.path == "/analyze":
+        if path == "/analyze":
             job_id, ev = ANALYSER.submit(iuid, env, force)
             # Synchronous by request. A full analysis is ~11 minutes, which is
             # longer than most clients and gateways will hold a connection, so
@@ -934,7 +974,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "error": j.get("error", "unknown failure"),
                                     "seconds": j.get("seconds")})
 
-        return self._json(404, {"error": "not found", "path": self.path})
+        return self._json(404, {"error": "not found", "path": self.path,
+                                "resolved": path})
 
 
 def main():

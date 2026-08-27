@@ -177,7 +177,7 @@ def stone_lines(sid, stones, ureter):
             if zt:
                 bits.append(zt)
             if pd.notna(getattr(r, "dist_to_uvj_along_mm", None)):
-                bits.append(f"~{r.dist_to_uvj_along_mm:.0f} mm from UVJ")
+                pass    # distance withheld -- see make_report.ZONE_UR
             loc = " - ".join(bits) if bits else "Ureter"
             out[side].append([f"Ureter ({UR_SHORT.get(zone, zone)})", size,
                               int(r.hu_max), loc, NA])
