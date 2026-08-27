@@ -83,3 +83,6 @@ final_whole_Data_analysis/study_scored.csv
 final_whole_Data_analysis/judge_oof.csv
 final_whole_Data_analysis/judge_model.joblib
 final_whole_Data_analysis/judge.log
+
+# rendered report sheets: image output, regenerable
+visual_output/
