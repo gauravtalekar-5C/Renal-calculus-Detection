@@ -76,3 +76,10 @@ final_whole_Data_analysis/cohort_phase2.csv
 final_whole_Data_analysis/cohort_phase2_ledger.csv
 final_whole_Data_analysis/per_study_result.csv
 final_whole_Data_analysis/supervisor.log
+final_whole_Data_analysis/candidates_pooled.csv
+final_whole_Data_analysis/judge_scored.csv
+final_whole_Data_analysis/combined_scored.csv
+final_whole_Data_analysis/study_scored.csv
+final_whole_Data_analysis/judge_oof.csv
+final_whole_Data_analysis/judge_model.joblib
+final_whole_Data_analysis/judge.log
