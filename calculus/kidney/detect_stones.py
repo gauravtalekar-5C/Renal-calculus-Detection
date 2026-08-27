@@ -1622,6 +1622,36 @@ def analyse(study_id, verbose=False, kidney_only=True, denoise=True):
         # reason is the earliest one in the chain rather than the last tested
         if not reason and dmax < MIN_DIAM_MM:
             reason = "below_min_diameter"          # too small to report on
+        # A STRAND, NOT A STONE -- now a rejection, not just a flag.
+        #
+        # FILL_SUSPECT has said "below this the caliper describes a strand, not
+        # a stone" since it was written, and produced only the caliper_suspect
+        # flag. Nothing downstream acts on a flag: the report counts a flagged
+        # stone as a stone and so does the API. Measured over 337 cohort
+        # studies, that inaction is 52 of the 69 renal false-positive
+        # detections.
+        #
+        # The evidence that these are artefact and not small stones is that
+        # they look the same whether the patient has a calculus or not:
+        #
+        #                             clean studies        positive studies
+        #                             n   fill   size      n   fill   size
+        #   kidney                   18  0.255   4.9 mm  279  0.625   3.7 mm
+        #   renal_pelvis_or_perirenal 52  0.022  12.1 mm  32  0.043  10.3 mm
+        #
+        # A real kidney stone is compact (0.625) and small (3.7 mm). The
+        # perirenal population is large and hollow in BOTH groups -- vessel
+        # calcification and growth along the renal pelvis, not disease.
+        #
+        # Not scoped to that compartment, because "the caliper describes a
+        # strand" is a statement about the measurement and not about where it
+        # happened. At study level this costs NO sensitivity: 20 of 311
+        # detections in positive studies fall below it, and every one of those
+        # studies keeps another detection. False positives fall 57.5% -> 52.4%.
+        if not reason:
+            _f = fill_fraction(pv_mm3, dmax)
+            if np.isfinite(_f) and _f < FILL_SUSPECT:
+                reason = "strand_not_stone"
         # flagged for human review, NOT rejected -- a 30 mm+ object is either a
         # genuine staghorn or a segmentation failure, and only a person can say
         oversized = dmax > MAX_STONE_DIAM_MM
