@@ -54,7 +54,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # package root -> project root: calculus/<sub>/x.py is two levels down
 ROOT = os.path.dirname(os.path.dirname(HERE))
 from calculus.common.paths import CSV, RUN, SEG                              # noqa: E402
-from calculus.report.make_report import (NA, ZONE, kidney_location, ap_label, fmt_size,        # noqa: E402
+from calculus.report.make_report import (NA, ZONE, ZONE_TEXT, ZONE_UR,
+                                        kidney_location, ap_label, fmt_size,        # noqa: E402
                          mask_dims_mm)
 
 # one folder for every per-study table, not two
@@ -62,12 +63,19 @@ OUT = os.path.join(RUN, "reports")
 
 # the clinical phrasing the user's report template uses
 # Organ column: exactly the sample report's wording, "Ureter (lower)".
-UR_SHORT = {"upper": "upper", "mid": "mid", "lower": "lower", "vuj": "VUJ"}
+UR_SHORT = ZONE_UR
 # Location column: the anatomical landmark the user asked for, then the
 # distance. Separated by " - " and not a comma, so the field stays one cell in
 # any viewer that does not honour CSV quoting.
-UR_ZONE = {"upper": "Near PUJ", "mid": "Mid ureter",
-           "lower": "Near VUJ", "vuj": "At VUJ"}
+# IMPORTED, not restated. These were local copies of make_report's ZONE_TEXT and
+# ZONE_UR, and when the reported scheme changed from four zones to three, only
+# make_report was updated -- so _calculi.csv said "Ureter (distal)" while
+# _report.csv, which is the file the API actually reads, still said
+# "Ureter (VUJ)". The change looked live in one artefact and was not in the one
+# that ships. Exactly the divergence that made the kidney captures vanish this
+# morning, when render_secondary formatted its own size string instead of
+# calling fmt_size.
+UR_ZONE = ZONE_TEXT
 
 
 def _assessable(sid):
